@@ -268,7 +268,7 @@ func processSinglePackage(
 
 		tagCtx, cancelTag := context.WithTimeout(ctx, config.TagTimeout)
 
-		initArgs := []string{"init", "--migrate", "--name", packageName, "--version", tag}
+		initArgs := []string{"init", "--migrate", "--name", packageName, "--version", tag, "--type", config.PackageType}
 		err = runWpmCommand(tagCtx, config.WpmPath, initArgs, tagPath)
 		if err != nil {
 			manifest.AddFailure(packageName, tag)
