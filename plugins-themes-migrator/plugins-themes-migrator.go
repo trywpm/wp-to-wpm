@@ -4,37 +4,38 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
-	"slices"
-
+	// "github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
 
 const (
-	defaultWorkers      = 5
-	defaultTagTimeout   = 5 * time.Minute
-	defaultLogFile      = "migrator-activity.log"
-	pluginRepoURL       = "https://plugins.svn.wordpress.org"
-	themeRepoURL        = "https://themes.svn.wordpress.org"
-	pluginsJSONFile     = "plugins.json"
-	themesJSONFile      = "themes.json"
-	pluginsManifestFile = "plugins-manifest.json"
-	themesManifestFile  = "themes-manifest.json"
+	defaultWorkers          = 5
+	defaultTagTimeout       = 5 * time.Minute
+	defaultLogFile          = "migrator-activity.log"
+	pluginRepoURL           = "https://plugins.svn.wordpress.org"
+	themeRepoURL            = "https://themes.svn.wordpress.org"
+	pluginsJSONFile         = "plugins.json"
+	themesJSONFile          = "themes.json"
+	pluginsManifestFile     = "plugins-manifest.json"
+	themesManifestFile      = "themes-manifest.json"
+	migratedPluginsJSONFile = "migrated-plugins.json"
+	migratedThemesJSONFile  = "migrated-themes.json"
 )
 
 var log = logrus.New()
 
 // Manifest stores the migration state for packages.
 // It holds a map of package names to their failed tags.
-// This allows us to track which tags have already failed migration attempts.
 type Manifest struct {
 	mu       sync.Mutex
 	path     string
@@ -44,22 +45,19 @@ type Manifest struct {
 func (m *Manifest) Load(path string) error {
 	m.path = path
 	m.Packages = make(map[string][]string)
-
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil // file doesn't exist, which is fine.
+			return nil
 		}
 		return fmt.Errorf("failed to read manifest %s: %w", path, err)
 	}
-
 	return json.Unmarshal(data, &m.Packages)
 }
 
 func (m *Manifest) Save() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
 	data, err := json.MarshalIndent(m.Packages, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal manifest: %w", err)
@@ -67,72 +65,136 @@ func (m *Manifest) Save() error {
 	return os.WriteFile(m.path, data, 0644)
 }
 
-// AddFailure safely adds a failed tag to the manifest.
 func (m *Manifest) AddFailure(packageName, tag string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	// avoid duplicates
 	if slices.Contains(m.Packages[packageName], tag) {
 		return
 	}
-
 	m.Packages[packageName] = append(m.Packages[packageName], tag)
 }
 
-func setupLogger(logFilePath string) error {
-	log.SetLevel(logrus.InfoLevel)
-	log.SetFormatter(&logrus.TextFormatter{
-		FullTimestamp: true,
-		ForceColors:   true,
-	})
-
-	file, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+func loadPackageMap(path string) (map[string]string, error) {
+	packages := make(map[string]string)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("failed to open log file %s: %w", logFilePath, err)
+		if os.IsNotExist(err) {
+			return packages, nil // file doesn't exist, return empty map
+		}
+		return nil, fmt.Errorf("failed to read package map %s: %w", path, err)
+	}
+	if err := json.Unmarshal(data, &packages); err != nil {
+		return nil, fmt.Errorf("failed to parse package map %s: %w", path, err)
+	}
+	return packages, nil
+}
+
+func savePackageMap(path string, packages map[string]string) error {
+	data, err := json.MarshalIndent(packages, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal package map: %w", err)
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+// FileHook enables dual logging: structured JSON to file, readable text to stdout
+type FileHook struct {
+	file      *os.File
+	formatter logrus.Formatter
+	levels    []logrus.Level
+}
+
+func NewFileHook(filePath string, formatter logrus.Formatter, levels []logrus.Level) (*FileHook, error) {
+	logDir := filepath.Dir(filePath)
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create log directory %s: %w", logDir, err)
 	}
 
-	log.SetOutput(io.MultiWriter(os.Stdout, file))
-	log.Infof("logging to stdout and %s", logFilePath)
+	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open log file %s: %w", filePath, err)
+	}
+
+	return &FileHook{file: file, formatter: formatter, levels: levels}, nil
+}
+
+func (hook *FileHook) Fire(entry *logrus.Entry) error {
+	lineBytes, err := hook.formatter.Format(entry)
+	if err != nil {
+		return err
+	}
+	_, err = hook.file.Write(lineBytes)
+	return err
+}
+
+func (hook *FileHook) Levels() []logrus.Level {
+	if len(hook.levels) == 0 {
+		return logrus.AllLevels
+	}
+	return hook.levels
+}
+
+func setupLogger(logLevel logrus.Level, jsonLogFilePath string, verbose bool) error {
+	log.SetOutput(os.Stdout)
+	log.SetLevel(logLevel)
+
+	if verbose {
+		log.SetFormatter(&logrus.TextFormatter{
+			FullTimestamp:   true,
+			TimestampFormat: "2006-01-02 15:04:05.000",
+			ForceColors:     true,
+		})
+	} else {
+		log.SetFormatter(&logrus.TextFormatter{
+			TimestampFormat: "15:04:05",
+			ForceColors:     true,
+		})
+	}
+
+	if jsonLogFilePath != "" {
+		fileHook, err := NewFileHook(jsonLogFilePath, &logrus.JSONFormatter{
+			TimestampFormat: time.RFC3339Nano,
+		}, logrus.AllLevels)
+
+		if err != nil {
+			log.WithError(err).Errorf("❌ failed to initialize file logging: %s", jsonLogFilePath)
+		} else {
+			log.AddHook(fileHook)
+			log.Infof("📝 logging: text to stdout, json to %s", jsonLogFilePath)
+		}
+	} else {
+		log.Info("📝 logging: text to stdout only")
+	}
 
 	return nil
 }
 
-// checkoutPackage performs an SVN checkout of the specified package.
-// It returns the local path where the package was checked out.
 func checkoutPackage(ctx context.Context, svnRepoURL, packageName, packageType, outputDir string) (string, error) {
 	var packageSvnURL string
 	localCheckoutPath := filepath.Join(outputDir, packageName)
 
-	// for plugins, we only want the 'tags' directory to save space and time.
-	// for themes, we need the whole directory as there's no standard 'tags' subdir.
 	if packageType == "plugin" {
 		packageSvnURL = fmt.Sprintf("%s/%s/tags", strings.TrimRight(svnRepoURL, "/"), packageName)
 	} else {
 		packageSvnURL = fmt.Sprintf("%s/%s", strings.TrimRight(svnRepoURL, "/"), packageName)
 	}
 
-	// clean up any previous checkout to avoid conflicts.
 	_ = os.RemoveAll(localCheckoutPath)
-
 	cmd := exec.CommandContext(ctx, "svn", "checkout", packageSvnURL, localCheckoutPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("svn checkout failed for %s: %w\noutput: %s", packageName, err, string(output))
 	}
-
 	return localCheckoutPath, nil
 }
 
-// getPackageSvnTags reads the local directory structure to find version tags.
 func getPackageSvnTags(tagsPath string) ([]string, error) {
 	entries, err := os.ReadDir(tagsPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return []string{}, nil // no tags directory is not a fatal error.
+			return []string{}, nil
 		}
 		return nil, fmt.Errorf("failed to read tags directory %s: %w", tagsPath, err)
 	}
-
 	var tags []string
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -142,11 +204,9 @@ func getPackageSvnTags(tagsPath string) ([]string, error) {
 	return tags, nil
 }
 
-// runWpmCommand executes wpm init or wpm publish.
 func runWpmCommand(ctx context.Context, wpmPath string, args []string, workDir string) error {
 	cmd := exec.CommandContext(ctx, wpmPath, args...)
 	cmd.Dir = workDir
-
 	if output, err := cmd.CombinedOutput(); err != nil {
 		log.WithFields(logrus.Fields{
 			"cmd":     "wpm " + strings.Join(args, " "),
@@ -155,18 +215,17 @@ func runWpmCommand(ctx context.Context, wpmPath string, args []string, workDir s
 		}).Error("❌ wpm command failed.")
 		return fmt.Errorf("wpm command failed: %w", err)
 	}
-
 	return nil
 }
 
-// processSinglePackage processes a single package by checking it out, finding tags, and migrating each tag.
-// It handles the logic for initializing and publishing with wpm, including error handling and logging.
 func processSinglePackage(
 	ctx context.Context,
 	packageName string,
 	config *MigratorConfig,
 	manifest *Manifest,
-	packagesToMigrate map[string]string,
+	packagesToProcess map[string]string,
+	successfulMigrations map[string]string,
+	successMu *sync.Mutex,
 ) {
 	l := log.WithField("package", packageName)
 	l.Info("👷 worker started processing.")
@@ -175,14 +234,8 @@ func processSinglePackage(
 	if err == nil {
 		defer os.RemoveAll(localPath)
 	}
-
 	if err != nil {
-		if err.Error() == "no tags directory" {
-			return
-		}
-
 		l.WithError(err).Error("❌ checkout failed.")
-
 		return
 	}
 
@@ -215,68 +268,74 @@ func processSinglePackage(
 
 		tagCtx, cancelTag := context.WithTimeout(ctx, config.TagTimeout)
 
-		// wpm init
 		initArgs := []string{"init", "--migrate", "--name", packageName, "--version", tag}
 		err = runWpmCommand(tagCtx, config.WpmPath, initArgs, tagPath)
 		if err != nil {
 			manifest.AddFailure(packageName, tag)
 			cancelTag()
-			continue // try next tag
+			continue
 		}
 
-		// find correct tag to publish
 		publishTagValue := "untagged"
-		latestVersion, hasLatest := packagesToMigrate[packageName]
+		latestVersion, hasLatest := packagesToProcess[packageName]
 		if hasLatest && tag == latestVersion {
 			publishTagValue = "latest"
 		}
-		l.Infof("publishing with --tag %s", publishTagValue)
 
-		// wpm publish
 		publishArgs := []string{"--registry", config.RegistryURL, "publish", "--access", "public", "--tag", publishTagValue}
 		err = runWpmCommand(tagCtx, config.WpmPath, publishArgs, tagPath)
 		if err != nil {
 			manifest.AddFailure(packageName, tag)
 			cancelTag()
-			continue // try next tag
+			continue
 		}
 		cancelTag()
 		l.WithField("tag", tag).Info("🎉 tag migrated successfully.")
+
+		if publishTagValue == "latest" {
+			successMu.Lock()
+			successfulMigrations[packageName] = latestVersion
+			successMu.Unlock()
+			l.Infof("✅ successfully migrated to latest version %s.", latestVersion)
+		}
 	}
 
 	l.Info("✅ worker finished processing.")
 }
 
-// migrationWorker now just pulls from the job channel and calls the processing function.
 func migrationWorker(
 	ctx context.Context,
 	jobs <-chan string,
 	wg *sync.WaitGroup,
 	config *MigratorConfig,
 	manifest *Manifest,
-	packagesToMigrate map[string]string,
+	packagesToProcess map[string]string,
+	successfulMigrations map[string]string,
+	successMu *sync.Mutex,
 ) {
 	defer wg.Done()
 	for packageName := range jobs {
-		processSinglePackage(ctx, packageName, config, manifest, packagesToMigrate)
+		processSinglePackage(ctx, packageName, config, manifest, packagesToProcess, successfulMigrations, successMu)
 	}
 }
 
 type MigratorConfig struct {
-	PackageType  string
-	InputFile    string
-	ManifestFile string
-	SvnRepoURL   string
-	WorkDir      string
-	WpmPath      string
-	NumWorkers   int
-	TagTimeout   time.Duration
-	RegistryURL  string
+	PackageType      string
+	DesiredStateFile string
+	CurrentStateFile string
+	ManifestFile     string
+	SvnRepoURL       string
+	WorkDir          string
+	WpmPath          string
+	NumWorkers       int
+	TagTimeout       time.Duration
+	RegistryURL      string
 }
 
 func runMigrator(cmd *cobra.Command, args []string) error {
 	logFilePath, _ := cmd.Flags().GetString("log-file")
-	if err := setupLogger(logFilePath); err != nil {
+	if err := setupLogger(logrus.InfoLevel, logFilePath, cmd.Flags().Changed("verbose")); err != nil {
+		fmt.Fprintf(os.Stderr, "critical: failed to setup logger: %v\n", err)
 		return err
 	}
 
@@ -284,7 +343,6 @@ func runMigrator(cmd *cobra.Command, args []string) error {
 	if pkgType != "plugin" && pkgType != "theme" {
 		return fmt.Errorf("type must be 'plugin' or 'theme'")
 	}
-
 	wpmPath, _ := cmd.Flags().GetString("wpm-path")
 	if wpmPath == "" {
 		var err error
@@ -303,11 +361,13 @@ func runMigrator(cmd *cobra.Command, args []string) error {
 	config.RegistryURL, _ = cmd.Flags().GetString("registry")
 
 	if pkgType == "plugin" {
-		config.InputFile = pluginsJSONFile
+		config.DesiredStateFile = pluginsJSONFile
+		config.CurrentStateFile = migratedPluginsJSONFile
 		config.ManifestFile = pluginsManifestFile
 		config.SvnRepoURL = pluginRepoURL
 	} else {
-		config.InputFile = themesJSONFile
+		config.DesiredStateFile = themesJSONFile
+		config.CurrentStateFile = migratedThemesJSONFile
 		config.ManifestFile = themesManifestFile
 		config.SvnRepoURL = themeRepoURL
 	}
@@ -320,41 +380,64 @@ func runMigrator(cmd *cobra.Command, args []string) error {
 	defer os.RemoveAll(workDir)
 	log.Infof("📁 using temporary work directory: %s", workDir)
 
-	// load plugins or themes to migrate from the existing JSON file
-	packagesToMigrate := make(map[string]string)
-	data, err := os.ReadFile(config.InputFile)
+	desiredState, err := loadPackageMap(config.DesiredStateFile)
 	if err != nil {
-		return fmt.Errorf("input file %s not found. please run the generator first: %w", config.InputFile, err)
+		return err
 	}
-	if err := json.Unmarshal(data, &packagesToMigrate); err != nil {
-		return fmt.Errorf("failed to parse %s: %w", config.InputFile, err)
+	currentState, err := loadPackageMap(config.CurrentStateFile)
+	if err != nil {
+		return err
 	}
+
+	packagesToProcess := make(map[string]string)
+	for pkgName, desiredVersion := range desiredState {
+		if currentVersion, ok := currentState[pkgName]; !ok || currentVersion != desiredVersion {
+			packagesToProcess[pkgName] = desiredVersion
+		}
+	}
+
+	if len(packagesToProcess) == 0 {
+		log.Info("✅ all packages are up-to-date. no migration needed.")
+		return nil
+	}
+
+	log.Infof("found %d packages to migrate (new or updated).", len(packagesToProcess))
 
 	manifest := &Manifest{}
 	if err := manifest.Load(config.ManifestFile); err != nil {
 		return fmt.Errorf("could not load manifest %s: %w", config.ManifestFile, err)
 	}
 
-	log.Infof("🚀 starting migration of %d %ss with %d workers.", len(packagesToMigrate), pkgType, config.NumWorkers)
+	successfulMigrations := make(map[string]string)
+	var successMu sync.Mutex
 
-	// fire up workers to process the migration
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	jobs := make(chan string, len(packagesToMigrate))
+	jobs := make(chan string, len(packagesToProcess))
 	var wg sync.WaitGroup
 
 	for range config.NumWorkers {
 		wg.Add(1)
-		go migrationWorker(ctx, jobs, &wg, config, manifest, packagesToMigrate)
+		go migrationWorker(ctx, jobs, &wg, config, manifest, packagesToProcess, successfulMigrations, &successMu)
 	}
 
-	for pkgName := range packagesToMigrate {
+	for pkgName := range packagesToProcess {
 		jobs <- pkgName
 	}
 	close(jobs)
 
 	wg.Wait()
+
+	if len(successfulMigrations) > 0 {
+		log.Infof("updating migrated state file with %d successful migrations...", len(successfulMigrations))
+		maps.Copy(currentState, successfulMigrations)
+		if err := savePackageMap(config.CurrentStateFile, currentState); err != nil {
+			log.WithError(err).Error("❌ failed to save updated migrated state file.")
+		} else {
+			log.Infof("✅ successfully saved migrated state to %s.", config.CurrentStateFile)
+		}
+	}
 
 	log.Info("💾 saving final manifest...")
 	if err := manifest.Save(); err != nil {
@@ -380,7 +463,7 @@ func main() {
 	rootCmd.Flags().Duration("tag-timeout", defaultTagTimeout, "timeout for migrating a single tag")
 	rootCmd.Flags().String("wpm-path", "", "path to wpm binary (if not in path)")
 	rootCmd.Flags().String("log-file", defaultLogFile, "path to the activity log file")
-	rootCmd.Flags().StringP("registry", "r", "registry.wpm.so", "registry URL to use for wpm commands")
+	rootCmd.Flags().StringP("registry", "r", "registry.wpm.so", "registry url to use for wpm commands")
 	_ = rootCmd.MarkFlagRequired("type")
 
 	if err := rootCmd.Execute(); err != nil {
