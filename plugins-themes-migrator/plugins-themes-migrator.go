@@ -1,4 +1,3 @@
-// FILE: plugins-themes-migrator.go
 package main
 
 import (
