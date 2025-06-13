@@ -325,13 +325,23 @@ func runMigrator(cmd *cobra.Command, args []string) error {
 		config.SvnRepoURL = themeRepoURL
 	}
 
-	workDir, err := os.MkdirTemp("", "wpm-migration-*")
-	if err != nil {
-		return fmt.Errorf("failed to create temporary working directory: %w", err)
+	workDirFlag, _ := cmd.Flags().GetString("work-dir")
+	if workDirFlag != "" {
+		log.Infof("📁 using user-provided work directory: %s", workDirFlag)
+		if err := os.MkdirAll(workDirFlag, 0755); err != nil {
+			return fmt.Errorf("failed to create specified work directory %s: %w", workDirFlag, err)
+		}
+		config.WorkDir = workDirFlag
+	} else {
+		tempDir, err := os.MkdirTemp("", "wpm-migration-*")
+		if err != nil {
+			return fmt.Errorf("failed to create temporary working directory: %w", err)
+		}
+		config.WorkDir = tempDir
+		log.Infof("📁 using temporary work directory: %s", tempDir)
 	}
-	config.WorkDir = workDir
-	defer os.RemoveAll(workDir)
-	log.Infof("📁 using temporary work directory: %s", workDir)
+
+	defer os.RemoveAll(config.WorkDir)
 
 	desiredState, err := loadPackageMap(config.DesiredStateFile)
 	if err != nil {
@@ -406,6 +416,7 @@ func main() {
 	rootCmd.Flags().String("wpm-path", "", "path to wpm binary (if not in path)")
 	rootCmd.Flags().String("log-file", defaultLogFile, "path to the activity log file")
 	rootCmd.Flags().StringP("registry", "r", "registry.wpm.so", "registry url to use for wpm commands")
+	rootCmd.Flags().StringP("work-dir", "d", "", "Directory for SVN checkouts (uses a temporary dir if not set)")
 	_ = rootCmd.MarkFlagRequired("type")
 
 	if err := rootCmd.Execute(); err != nil {
