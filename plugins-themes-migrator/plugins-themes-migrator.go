@@ -8,12 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
 
-	// "github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
@@ -26,53 +24,11 @@ const (
 	themeRepoURL            = "https://themes.svn.wordpress.org"
 	pluginsJSONFile         = "plugins.json"
 	themesJSONFile          = "themes.json"
-	pluginsManifestFile     = "plugins-manifest.json"
-	themesManifestFile      = "themes-manifest.json"
 	migratedPluginsJSONFile = "migrated-plugins.json"
 	migratedThemesJSONFile  = "migrated-themes.json"
 )
 
 var log = logrus.New()
-
-// Manifest stores the migration state for packages.
-// It holds a map of package names to their failed tags.
-type Manifest struct {
-	mu       sync.Mutex
-	path     string
-	Packages map[string][]string `json:"packages"`
-}
-
-func (m *Manifest) Load(path string) error {
-	m.path = path
-	m.Packages = make(map[string][]string)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("failed to read manifest %s: %w", path, err)
-	}
-	return json.Unmarshal(data, &m.Packages)
-}
-
-func (m *Manifest) Save() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	data, err := json.MarshalIndent(m.Packages, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal manifest: %w", err)
-	}
-	return os.WriteFile(m.path, data, 0644)
-}
-
-func (m *Manifest) AddFailure(packageName, tag string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if slices.Contains(m.Packages[packageName], tag) {
-		return
-	}
-	m.Packages[packageName] = append(m.Packages[packageName], tag)
-}
 
 func loadPackageMap(path string) (map[string]string, error) {
 	packages := make(map[string]string)
@@ -197,7 +153,7 @@ func getPackageSvnTags(tagsPath string) ([]string, error) {
 	}
 	var tags []string
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if entry.IsDir() && entry.Name() != ".svn" {
 			tags = append(tags, entry.Name())
 		}
 	}
@@ -222,7 +178,6 @@ func processSinglePackage(
 	ctx context.Context,
 	packageName string,
 	config *MigratorConfig,
-	manifest *Manifest,
 	packagesToProcess map[string]string,
 	successfulMigrations map[string]string,
 	successMu *sync.Mutex,
@@ -255,23 +210,11 @@ func processSinglePackage(
 		tagPath := filepath.Join(tagsPath, tag)
 		l.WithField("tag", tag).Info("🏷️ migrating tag.")
 
-		isFailed := false
-		manifest.mu.Lock()
-		if slices.Contains(manifest.Packages[packageName], tag) {
-			isFailed = true
-		}
-		manifest.mu.Unlock()
-		if isFailed {
-			l.WithField("tag", tag).Warn("⏭️ skipping previously failed tag.")
-			continue
-		}
-
 		tagCtx, cancelTag := context.WithTimeout(ctx, config.TagTimeout)
 
 		initArgs := []string{"init", "--migrate", "--name", packageName, "--version", tag, "--type", config.PackageType}
 		err = runWpmCommand(tagCtx, config.WpmPath, initArgs, tagPath)
 		if err != nil {
-			manifest.AddFailure(packageName, tag)
 			cancelTag()
 			continue
 		}
@@ -285,7 +228,6 @@ func processSinglePackage(
 		publishArgs := []string{"--registry", config.RegistryURL, "publish", "--access", "public", "--tag", publishTagValue}
 		err = runWpmCommand(tagCtx, config.WpmPath, publishArgs, tagPath)
 		if err != nil {
-			manifest.AddFailure(packageName, tag)
 			cancelTag()
 			continue
 		}
@@ -308,14 +250,13 @@ func migrationWorker(
 	jobs <-chan string,
 	wg *sync.WaitGroup,
 	config *MigratorConfig,
-	manifest *Manifest,
 	packagesToProcess map[string]string,
 	successfulMigrations map[string]string,
 	successMu *sync.Mutex,
 ) {
 	defer wg.Done()
 	for packageName := range jobs {
-		processSinglePackage(ctx, packageName, config, manifest, packagesToProcess, successfulMigrations, successMu)
+		processSinglePackage(ctx, packageName, config, packagesToProcess, successfulMigrations, successMu)
 	}
 }
 
@@ -323,7 +264,6 @@ type MigratorConfig struct {
 	PackageType      string
 	DesiredStateFile string
 	CurrentStateFile string
-	ManifestFile     string
 	SvnRepoURL       string
 	WorkDir          string
 	WpmPath          string
@@ -363,12 +303,10 @@ func runMigrator(cmd *cobra.Command, args []string) error {
 	if pkgType == "plugin" {
 		config.DesiredStateFile = pluginsJSONFile
 		config.CurrentStateFile = migratedPluginsJSONFile
-		config.ManifestFile = pluginsManifestFile
 		config.SvnRepoURL = pluginRepoURL
 	} else {
 		config.DesiredStateFile = themesJSONFile
 		config.CurrentStateFile = migratedThemesJSONFile
-		config.ManifestFile = themesManifestFile
 		config.SvnRepoURL = themeRepoURL
 	}
 
@@ -403,11 +341,6 @@ func runMigrator(cmd *cobra.Command, args []string) error {
 
 	log.Infof("found %d packages to migrate (new or updated).", len(packagesToProcess))
 
-	manifest := &Manifest{}
-	if err := manifest.Load(config.ManifestFile); err != nil {
-		return fmt.Errorf("could not load manifest %s: %w", config.ManifestFile, err)
-	}
-
 	successfulMigrations := make(map[string]string)
 	var successMu sync.Mutex
 
@@ -419,7 +352,7 @@ func runMigrator(cmd *cobra.Command, args []string) error {
 
 	for range config.NumWorkers {
 		wg.Add(1)
-		go migrationWorker(ctx, jobs, &wg, config, manifest, packagesToProcess, successfulMigrations, &successMu)
+		go migrationWorker(ctx, jobs, &wg, config, packagesToProcess, successfulMigrations, &successMu)
 	}
 
 	for pkgName := range packagesToProcess {
@@ -437,12 +370,6 @@ func runMigrator(cmd *cobra.Command, args []string) error {
 		} else {
 			log.Infof("✅ successfully saved migrated state to %s.", config.CurrentStateFile)
 		}
-	}
-
-	log.Info("💾 saving final manifest...")
-	if err := manifest.Save(); err != nil {
-		log.WithError(err).Error("❌ failed to save final manifest.")
-		return err
 	}
 
 	log.Info("🎉 migration process complete!")
