@@ -46,5 +46,5 @@ while true; do
 
     echo "Found files to process. Starting parallel move with 5 workers."
 
-    mc find "$source_find_path" --name "*.tar.zst" --ignore "_t*" | xargs -n 1 -P 5 -I {} bash -c 'move_tar_zst "{}"'
+    mc find "$source_find_path" --name "*.tar.zst" --ignore "_t*" | xargs -n 1 -P 50 -I {} bash -c 'move_tar_zst "{}"'
 done
