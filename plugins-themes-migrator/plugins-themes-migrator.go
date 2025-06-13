@@ -174,6 +174,27 @@ func runWpmCommand(ctx context.Context, wpmPath string, args []string, workDir s
 	return nil
 }
 
+func removeDirectoryWithRetry(path string, retries int, delay time.Duration) {
+	var err error
+	for i := range retries {
+		err = os.RemoveAll(path)
+		if err == nil {
+			log.WithField("path", path).Debug("Successfully removed temporary directory.")
+			return
+		}
+		log.WithFields(logrus.Fields{
+			"path":    path,
+			"attempt": i + 1,
+			"error":   err,
+		}).Warn("🧹 Failed to remove temporary directory, retrying...")
+		time.Sleep(delay)
+	}
+	log.WithFields(logrus.Fields{
+		"path":  path,
+		"error": err,
+	}).Error("❌ Failed to remove temporary directory after all retries.")
+}
+
 func processSinglePackage(
 	ctx context.Context,
 	packageName string,
@@ -186,13 +207,11 @@ func processSinglePackage(
 	l.Info("👷 worker started processing.")
 
 	localPath, err := checkoutPackage(ctx, config.SvnRepoURL, packageName, config.PackageType, config.WorkDir)
-	if err == nil {
-		defer os.RemoveAll(localPath)
-	}
 	if err != nil {
 		l.WithError(err).Error("❌ checkout failed.")
 		return
 	}
+	defer removeDirectoryWithRetry(localPath, 5, 200*time.Millisecond)
 
 	tagsPath := localPath
 	tags, err := getPackageSvnTags(tagsPath)
@@ -211,11 +230,10 @@ func processSinglePackage(
 		l.WithField("tag", tag).Info("🏷️ migrating tag.")
 
 		tagCtx, cancelTag := context.WithTimeout(ctx, config.TagTimeout)
+		defer cancelTag()
 
 		initArgs := []string{"init", "--migrate", "--name", packageName, "--version", tag, "--type", config.PackageType}
-		err = runWpmCommand(tagCtx, config.WpmPath, initArgs, tagPath)
-		if err != nil {
-			cancelTag()
+		if err := runWpmCommand(tagCtx, config.WpmPath, initArgs, tagPath); err != nil {
 			continue
 		}
 
@@ -226,12 +244,9 @@ func processSinglePackage(
 		}
 
 		publishArgs := []string{"--registry", config.RegistryURL, "publish", "--access", "public", "--tag", publishTagValue}
-		err = runWpmCommand(tagCtx, config.WpmPath, publishArgs, tagPath)
-		if err != nil {
-			cancelTag()
+		if err := runWpmCommand(tagCtx, config.WpmPath, publishArgs, tagPath); err != nil {
 			continue
 		}
-		cancelTag()
 		l.WithField("tag", tag).Info("🎉 tag migrated successfully.")
 
 		if publishTagValue == "latest" {
