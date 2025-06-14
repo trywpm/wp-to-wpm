@@ -225,38 +225,6 @@ func processSinglePackage(
 	}
 	l.Infof("found %d tags to process.", len(tags))
 
-	for _, tag := range tags {
-		tagPath := filepath.Join(tagsPath, tag)
-		l.WithField("tag", tag).Info("🏷️ migrating tag.")
-
-		tagCtx, cancelTag := context.WithTimeout(ctx, config.TagTimeout)
-		defer cancelTag()
-
-		initArgs := []string{"init", "--migrate", "--name", packageName, "--version", tag, "--type", config.PackageType}
-		if err := runWpmCommand(tagCtx, config.WpmPath, initArgs, tagPath); err != nil {
-			continue
-		}
-
-		publishTagValue := "untagged"
-		latestVersion, hasLatest := packagesToProcess[packageName]
-		if hasLatest && tag == latestVersion {
-			publishTagValue = "latest"
-		}
-
-		publishArgs := []string{"--registry", config.RegistryURL, "publish", "--access", "public", "--tag", publishTagValue}
-		if err := runWpmCommand(tagCtx, config.WpmPath, publishArgs, tagPath); err != nil {
-			continue
-		}
-		l.WithField("tag", tag).Info("🎉 tag migrated successfully.")
-
-		if publishTagValue == "latest" {
-			successMu.Lock()
-			successfulMigrations[packageName] = latestVersion
-			successMu.Unlock()
-			l.Infof("✅ successfully migrated to latest version %s.", latestVersion)
-		}
-	}
-
 	l.Info("✅ worker finished processing.")
 }
 
