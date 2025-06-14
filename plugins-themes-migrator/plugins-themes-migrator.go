@@ -20,7 +20,7 @@ const (
 	defaultWorkers          = 5
 	defaultTagTimeout       = 5 * time.Minute
 	defaultLogFile          = "migrator-activity.log"
-	pluginRepoURL           = "https://plugins.svn.wordpress.org"
+	pluginRepoURL           = "http://svn.wp-plugins.org"
 	themeRepoURL            = "https://themes.svn.wordpress.org"
 	pluginsJSONFile         = "plugins.json"
 	themesJSONFile          = "themes.json"
