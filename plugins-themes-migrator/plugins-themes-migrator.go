@@ -4,14 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
@@ -20,7 +21,7 @@ const (
 	defaultWorkers          = 5
 	defaultTagTimeout       = 5 * time.Minute
 	defaultLogFile          = "migrator-activity.log"
-	pluginRepoURL           = "http://svn.wp-plugins.org"
+	pluginRepoURL           = "https://plugins.svn.wordpress.org"
 	themeRepoURL            = "https://themes.svn.wordpress.org"
 	pluginsJSONFile         = "plugins.json"
 	themesJSONFile          = "themes.json"
@@ -30,12 +31,34 @@ const (
 
 var log = logrus.New()
 
+func updateStateFileAtomically(stateFilePath, packageName, version string) error {
+	lockFilePath := stateFilePath + ".lock"
+	fileLock := flock.New(lockFilePath)
+
+	err := fileLock.Lock()
+	if err != nil {
+		return fmt.Errorf("failed to acquire file lock: %w", err)
+	}
+	defer fileLock.Unlock()
+
+	currentState, err := loadPackageMap(stateFilePath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("failed to read state file while locked: %w", err)
+		}
+	}
+
+	currentState[packageName] = version
+
+	return savePackageMap(stateFilePath, currentState)
+}
+
 func loadPackageMap(path string) (map[string]string, error) {
 	packages := make(map[string]string)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return packages, nil // file doesn't exist, return empty map
+			return packages, nil
 		}
 		return nil, fmt.Errorf("failed to read package map %s: %w", path, err)
 	}
@@ -53,7 +76,6 @@ func savePackageMap(path string, packages map[string]string) error {
 	return os.WriteFile(path, data, 0644)
 }
 
-// FileHook enables dual logging: structured JSON to file, readable text to stdout
 type FileHook struct {
 	file      *os.File
 	formatter logrus.Formatter
@@ -125,7 +147,7 @@ func setupLogger(logLevel logrus.Level, jsonLogFilePath string, verbose bool) er
 	return nil
 }
 
-func checkoutPackage(ctx context.Context, svnRepoURL, packageName, packageType, outputDir string) (string, error) {
+func checkoutPackage(ctx context.Context, svnRepoURL, packageName, packageType, outputDir, proxy string) (string, error) {
 	var packageSvnURL string
 	localCheckoutPath := filepath.Join(outputDir, packageName)
 
@@ -136,9 +158,33 @@ func checkoutPackage(ctx context.Context, svnRepoURL, packageName, packageType, 
 	}
 
 	_ = os.RemoveAll(localCheckoutPath)
-	cmd := exec.CommandContext(ctx, "svn", "checkout", packageSvnURL, localCheckoutPath)
+
+	args := []string{}
+	if proxy != "" {
+		parts := strings.Split(proxy, ":")
+		if len(parts) != 2 {
+			return "", fmt.Errorf("invalid proxy format: %s (expected ip:port)", proxy)
+		}
+		proxyHost, proxyPort := parts[0], parts[1]
+		proxyArgs := []string{
+			"--config-option", fmt.Sprintf("servers:global:http-proxy-host=%s", proxyHost),
+			"--config-option", fmt.Sprintf("servers:global:http-proxy-port=%s", proxyPort),
+			"--non-interactive",
+			"--no-auth-cache",
+		}
+		args = append(args, proxyArgs...)
+	}
+
+	args = append(args, "checkout", packageSvnURL, localCheckoutPath)
+
+	cmd := exec.CommandContext(ctx, "svn", args...)
 	if output, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("svn checkout failed for %s: %w\noutput: %s", packageName, err, string(output))
+		proxyInfo := "none"
+		if proxy != "" {
+			proxyInfo = proxy
+		}
+		removeDirectoryWithRetry(localCheckoutPath, 10, 500*time.Millisecond)
+		return "", fmt.Errorf("svn checkout failed for %s (proxy: %s): %w\noutput: %s", packageName, proxyInfo, err, string(output))
 	}
 	return localCheckoutPath, nil
 }
@@ -163,10 +209,16 @@ func getPackageSvnTags(tagsPath string) ([]string, error) {
 func runWpmCommand(ctx context.Context, wpmPath string, args []string, workDir string) error {
 	cmd := exec.CommandContext(ctx, wpmPath, args...)
 	cmd.Dir = workDir
-	if output, err := cmd.CombinedOutput(); err != nil {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
 		log.WithFields(logrus.Fields{
 			"cmd":     "wpm " + strings.Join(args, " "),
-			"workDir": workDir,
+			"workdir": workDir,
 			"output":  string(output),
 		}).Error("❌ wpm command failed.")
 		return fmt.Errorf("wpm command failed: %w", err)
@@ -175,8 +227,13 @@ func runWpmCommand(ctx context.Context, wpmPath string, args []string, workDir s
 }
 
 func removeDirectoryWithRetry(path string, retries int, delay time.Duration) {
+	if path == "" {
+		log.Warn("🧹 No path provided for removal, skipping.")
+		return
+	}
+
 	var err error
-	for i := range retries {
+	for i := 0; i < retries; i++ {
 		err = os.RemoveAll(path)
 		if err == nil {
 			log.WithField("path", path).Debug("Successfully removed temporary directory.")
@@ -200,18 +257,16 @@ func processSinglePackage(
 	packageName string,
 	config *MigratorConfig,
 	packagesToProcess map[string]string,
-	successfulMigrations map[string]string,
-	successMu *sync.Mutex,
 ) {
 	l := log.WithField("package", packageName)
 	l.Info("👷 worker started processing.")
 
-	localPath, err := checkoutPackage(ctx, config.SvnRepoURL, packageName, config.PackageType, config.WorkDir)
+	localPath, err := checkoutPackage(ctx, config.SvnRepoURL, packageName, config.PackageType, config.WorkDir, config.Proxy)
 	if err != nil {
 		l.WithError(err).Error("❌ checkout failed.")
 		return
 	}
-	defer removeDirectoryWithRetry(localPath, 5, 200*time.Millisecond)
+	defer removeDirectoryWithRetry(localPath, 10, 500*time.Millisecond)
 
 	tagsPath := localPath
 	tags, err := getPackageSvnTags(tagsPath)
@@ -225,6 +280,39 @@ func processSinglePackage(
 	}
 	l.Infof("found %d tags to process.", len(tags))
 
+	for _, tag := range tags {
+		tagPath := filepath.Join(tagsPath, tag)
+		l.WithField("tag", tag).Info("migrating tag.")
+
+		tagCtx, cancelTag := context.WithTimeout(ctx, config.TagTimeout)
+		defer cancelTag()
+
+		initArgs := []string{"init", "--migrate", "--name", packageName, "--version", tag, "--type", config.PackageType}
+		if err := runWpmCommand(tagCtx, config.WpmPath, initArgs, tagPath); err != nil {
+			continue
+		}
+
+		publishTagValue := "untagged"
+		latestVersion, hasLatest := packagesToProcess[packageName]
+		if hasLatest && tag == latestVersion {
+			publishTagValue = "latest"
+		}
+
+		publishArgs := []string{"--registry", config.RegistryURL, "publish", "--access", "public", "--tag", publishTagValue}
+		if err := runWpmCommand(tagCtx, config.WpmPath, publishArgs, tagPath); err != nil {
+			continue
+		}
+		l.WithField("tag", tag).Info("tag migrated successfully.")
+
+		if publishTagValue == "latest" {
+			if err := updateStateFileAtomically(config.CurrentStateFile, packageName, latestVersion); err != nil {
+				l.WithError(err).Error("failed to update state file atomically.")
+			} else {
+				l.Infof("successfully migrated and saved state for latest version %s.", latestVersion)
+			}
+		}
+	}
+
 	l.Info("✅ worker finished processing.")
 }
 
@@ -234,12 +322,10 @@ func migrationWorker(
 	wg *sync.WaitGroup,
 	config *MigratorConfig,
 	packagesToProcess map[string]string,
-	successfulMigrations map[string]string,
-	successMu *sync.Mutex,
 ) {
 	defer wg.Done()
 	for packageName := range jobs {
-		processSinglePackage(ctx, packageName, config, packagesToProcess, successfulMigrations, successMu)
+		processSinglePackage(ctx, packageName, config, packagesToProcess)
 	}
 }
 
@@ -253,6 +339,8 @@ type MigratorConfig struct {
 	NumWorkers       int
 	TagTimeout       time.Duration
 	RegistryURL      string
+	Proxy            string
+	InputFile        string
 }
 
 func runMigrator(cmd *cobra.Command, args []string) error {
@@ -282,20 +370,36 @@ func runMigrator(cmd *cobra.Command, args []string) error {
 	config.NumWorkers, _ = cmd.Flags().GetInt("workers")
 	config.TagTimeout, _ = cmd.Flags().GetDuration("tag-timeout")
 	config.RegistryURL, _ = cmd.Flags().GetString("registry")
+	config.Proxy, _ = cmd.Flags().GetString("proxy")
+	config.InputFile, _ = cmd.Flags().GetString("input-file")
+
+	if config.Proxy != "" {
+		log.Infof("using proxy: %s", config.Proxy)
+	}
+
+	if config.InputFile != "" {
+		log.Infof("using user-provided input file: %s", config.InputFile)
+		config.DesiredStateFile = config.InputFile
+	} else {
+		log.Info("no input file provided, using default based on type.")
+		if pkgType == "plugin" {
+			config.DesiredStateFile = pluginsJSONFile
+		} else {
+			config.DesiredStateFile = themesJSONFile
+		}
+	}
 
 	if pkgType == "plugin" {
-		config.DesiredStateFile = pluginsJSONFile
 		config.CurrentStateFile = migratedPluginsJSONFile
 		config.SvnRepoURL = pluginRepoURL
 	} else {
-		config.DesiredStateFile = themesJSONFile
 		config.CurrentStateFile = migratedThemesJSONFile
 		config.SvnRepoURL = themeRepoURL
 	}
 
 	workDirFlag, _ := cmd.Flags().GetString("work-dir")
 	if workDirFlag != "" {
-		log.Infof("📁 using user-provided work directory: %s", workDirFlag)
+		log.Infof("using user-provided work directory: %s", workDirFlag)
 		if err := os.MkdirAll(workDirFlag, 0755); err != nil {
 			return fmt.Errorf("failed to create specified work directory %s: %w", workDirFlag, err)
 		}
@@ -306,9 +410,8 @@ func runMigrator(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to create temporary working directory: %w", err)
 		}
 		config.WorkDir = tempDir
-		log.Infof("📁 using temporary work directory: %s", tempDir)
+		log.Infof("using temporary work directory: %s", tempDir)
 	}
-
 	defer os.RemoveAll(config.WorkDir)
 
 	desiredState, err := loadPackageMap(config.DesiredStateFile)
@@ -328,14 +431,11 @@ func runMigrator(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(packagesToProcess) == 0 {
-		log.Info("✅ all packages are up-to-date. no migration needed.")
+		log.Info("all packages are up-to-date. no migration needed.")
 		return nil
 	}
 
 	log.Infof("found %d packages to migrate (new or updated).", len(packagesToProcess))
-
-	successfulMigrations := make(map[string]string)
-	var successMu sync.Mutex
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -343,9 +443,9 @@ func runMigrator(cmd *cobra.Command, args []string) error {
 	jobs := make(chan string, len(packagesToProcess))
 	var wg sync.WaitGroup
 
-	for range config.NumWorkers {
+	for i := 0; i < config.NumWorkers; i++ {
 		wg.Add(1)
-		go migrationWorker(ctx, jobs, &wg, config, packagesToProcess, successfulMigrations, &successMu)
+		go migrationWorker(ctx, jobs, &wg, config, packagesToProcess)
 	}
 
 	for pkgName := range packagesToProcess {
@@ -355,17 +455,7 @@ func runMigrator(cmd *cobra.Command, args []string) error {
 
 	wg.Wait()
 
-	if len(successfulMigrations) > 0 {
-		log.Infof("updating migrated state file with %d successful migrations...", len(successfulMigrations))
-		maps.Copy(currentState, successfulMigrations)
-		if err := savePackageMap(config.CurrentStateFile, currentState); err != nil {
-			log.WithError(err).Error("❌ failed to save updated migrated state file.")
-		} else {
-			log.Infof("✅ successfully saved migrated state to %s.", config.CurrentStateFile)
-		}
-	}
-
-	log.Info("🎉 migration process complete!")
+	log.Info("migration process complete!")
 	return nil
 }
 
@@ -384,11 +474,13 @@ func main() {
 	rootCmd.Flags().String("wpm-path", "", "path to wpm binary (if not in path)")
 	rootCmd.Flags().String("log-file", defaultLogFile, "path to the activity log file")
 	rootCmd.Flags().StringP("registry", "r", "registry.wpm.so", "registry url to use for wpm commands")
-	rootCmd.Flags().StringP("work-dir", "d", "", "Directory for SVN checkouts (uses a temporary dir if not set)")
+	rootCmd.Flags().StringP("work-dir", "d", "", "directory for svn checkouts (uses a temporary dir if not set)")
+	rootCmd.Flags().String("proxy", "", "http proxy to use for svn checkouts (e.g., '1.2.3.4:8001')")
 	_ = rootCmd.MarkFlagRequired("type")
+	rootCmd.Flags().String("input-file", "", "path to the input json file with the list of packages to process")
 
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "❌ error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 }
