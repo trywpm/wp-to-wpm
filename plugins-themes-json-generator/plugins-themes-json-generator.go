@@ -51,6 +51,16 @@ type QualifiedPackage struct {
 	Error   error
 }
 
+// PackageResult represents the outcome of checking a package
+type PackageResult struct {
+	Name       string
+	Version    string
+	Type       string
+	Status     string // "qualified", "not_found", "error", "existing"
+	StatusCode int
+	Error      error
+}
+
 func setupLogger(verbose bool) {
 	log.SetOutput(os.Stdout)
 	if verbose {
@@ -101,7 +111,7 @@ func listSVNPackages(ctx context.Context, svnRepoURL string) ([]string, error) {
 }
 
 // fetchLatestVersion qualifies a package by checking the WP API.
-func fetchLatestVersion(ctx context.Context, packageName, packageType string) (string, error) {
+func fetchLatestVersion(ctx context.Context, packageName, packageType string) (*PackageResult, error) {
 	var apiURL string
 	if packageType == "theme" {
 		apiURL = fmt.Sprintf("https://api.wordpress.org/themes/info/1.2/?action=theme_information&slug=%s", packageName)
@@ -111,18 +121,54 @@ func fetchLatestVersion(ctx context.Context, packageName, packageType string) (s
 
 	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
 	if err != nil {
-		return "", fmt.Errorf("failed to create api request: %w", err)
+		return &PackageResult{
+			Name:   packageName,
+			Type:   packageType,
+			Status: "error",
+			Error:  fmt.Errorf("failed to create api request: %w", err),
+		}, err
 	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("api request failed: %w", err)
+		log.WithFields(logrus.Fields{
+			"package": packageName,
+			"type":    packageType,
+		}).Warnf("⚠️ API request failed: %v", err)
+		return &PackageResult{
+			Name:   packageName,
+			Type:   packageType,
+			Status: "error",
+			Error:  fmt.Errorf("api request failed: %w", err),
+		}, err
 	}
 	defer resp.Body.Close()
 
-	// 4xx errors are "not found" or bad request, which means not qualified. We don't treat this as a retryable error.
+	result := &PackageResult{
+		Name:       packageName,
+		Type:       packageType,
+		StatusCode: resp.StatusCode,
+	}
+
+	// 404 means the package doesn't exist - should be removed from existing lists
+	if resp.StatusCode == 404 {
+		log.WithFields(logrus.Fields{
+			"package": packageName,
+			"type":    packageType,
+		}).Debug("🔍 Package not found (404) - will be removed from existing list")
+		result.Status = "not_found"
+		return result, fmt.Errorf("package not found (status 404)")
+	}
+
+	// Other 4xx errors are client errors - log them but don't remove from existing lists
 	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-		return "", fmt.Errorf("package not found or invalid via API (status %d)", resp.StatusCode)
+		log.WithFields(logrus.Fields{
+			"package": packageName,
+			"type":    packageType,
+			"status":  resp.StatusCode,
+		}).Warnf("⚠️ Client error from WordPress API (status %d)", resp.StatusCode)
+		result.Status = "error"
+		return result, fmt.Errorf("api client error (status %d)", resp.StatusCode)
 	}
 
 	// 5xx errors are server issues and might be temporary. We log these.
@@ -131,21 +177,36 @@ func fetchLatestVersion(ctx context.Context, packageName, packageType string) (s
 			"package": packageName,
 			"type":    packageType,
 			"status":  resp.StatusCode,
-		}).Error("❌ WordPress API returned a server error.")
-		return "", fmt.Errorf("api server error (status %d)", resp.StatusCode)
+		}).Errorf("❌ WordPress API returned a server error (status %d)", resp.StatusCode)
+		result.Status = "error"
+		return result, fmt.Errorf("api server error (status %d)", resp.StatusCode)
 	}
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	var apiResp APIResponse
 	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
-		return "", fmt.Errorf("failed to decode api response: %w", err)
+		log.WithFields(logrus.Fields{
+			"package": packageName,
+			"type":    packageType,
+		}).Warnf("⚠️ Failed to decode API response: %v", err)
+		result.Status = "error"
+		result.Error = fmt.Errorf("failed to decode api response: %w", err)
+		return result, err
 	}
 
 	if apiResp.Version == "" {
-		return "", fmt.Errorf("api response did not contain a version")
+		log.WithFields(logrus.Fields{
+			"package": packageName,
+			"type":    packageType,
+		}).Warn("⚠️ API response did not contain a version")
+		result.Status = "error"
+		result.Error = fmt.Errorf("api response did not contain a version")
+		return result, result.Error
 	}
 
-	return apiResp.Version, nil
+	result.Status = "qualified"
+	result.Version = apiResp.Version
+	return result, nil
 }
 
 // qualificationWorker processes package names from a channel to see if they are valid.
@@ -166,14 +227,22 @@ func qualificationWorker(ctx context.Context, jobs <-chan [2]string, results cha
 		}
 
 		// Check with the WordPress API.
-		version, err := fetchLatestVersion(ctx, packageName, packageType)
+		result, err := fetchLatestVersion(ctx, packageName, packageType)
 		if err != nil {
+			// Only send the result if it's a 404 (not_found) so we can remove it from existing lists
+			if result != nil && result.Status == "not_found" {
+				results <- &QualifiedPackage{
+					Name:  packageName,
+					Type:  packageType,
+					Error: err,
+				}
+			}
 			continue
 		}
 
 		results <- &QualifiedPackage{
 			Name:    packageName,
-			Version: version,
+			Version: result.Version,
 			Type:    packageType,
 		}
 	}
@@ -200,12 +269,49 @@ func saveJSON(filePath string, data interface{}) error {
 	return os.WriteFile(filePath, file, 0644)
 }
 
+// loadExistingJSON loads an existing JSON file into a map
+func loadExistingJSON(filePath string) (map[string]string, error) {
+	data := make(map[string]string)
+
+	// Check if file exists
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		log.WithField("file", filePath).Info("📄 No existing file found, starting fresh")
+		return data, nil
+	}
+
+	file, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read existing file %s: %w", filePath, err)
+	}
+
+	if err := json.Unmarshal(file, &data); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal existing file %s: %w", filePath, err)
+	}
+
+	log.WithFields(logrus.Fields{
+		"file":  filePath,
+		"count": len(data),
+	}).Info("📄 Loaded existing data")
+
+	return data, nil
+}
+
 func runGenerator(cmd *cobra.Command, args []string) error {
 	workers, _ := cmd.Flags().GetInt("workers")
 	verbose, _ := cmd.Flags().GetBool("verbose")
 	setupLogger(verbose)
 
-	// Setup context for graceful shutdown.
+	log.Info("📄 Loading existing data...")
+	existingPlugins, err := loadExistingJSON(pluginsJSONFile)
+	if err != nil {
+		return fmt.Errorf("failed to load existing plugins: %w", err)
+	}
+
+	existingThemes, err := loadExistingJSON(themesJSONFile)
+	if err != nil {
+		return fmt.Errorf("failed to load existing themes: %w", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sigCh := make(chan os.Signal, 1)
@@ -262,13 +368,82 @@ func runGenerator(cmd *cobra.Command, args []string) error {
 
 	plugins := make(map[string]string)
 	themes := make(map[string]string)
+
+	// Copy existing data
+	maps.Copy(plugins, existingPlugins)
+	maps.Copy(themes, existingThemes)
+
+	var removedCount, addedCount, updatedCount int
+
+	// Process results
 	for res := range results {
-		if res.Type == "plugin" {
-			plugins[res.Name] = res.Version
+		if res.Error != nil {
+			// This means it's a 404 - remove from existing lists
+			if res.Type == "plugin" {
+				if _, exists := plugins[res.Name]; exists {
+					delete(plugins, res.Name)
+					removedCount++
+					log.WithFields(logrus.Fields{
+						"package": res.Name,
+						"type":    res.Type,
+					}).Debug("🗑️ Removed package (404 from API)")
+				}
+			} else {
+				if _, exists := themes[res.Name]; exists {
+					delete(themes, res.Name)
+					removedCount++
+					log.WithFields(logrus.Fields{
+						"package": res.Name,
+						"type":    res.Type,
+					}).Debug("🗑️ Removed package (404 from API)")
+				}
+			}
 		} else {
-			themes[res.Name] = res.Version
+			if res.Type == "plugin" {
+				if existingVersion, exists := plugins[res.Name]; exists {
+					if existingVersion != res.Version {
+						updatedCount++
+						log.WithFields(logrus.Fields{
+							"package":    res.Name,
+							"oldVersion": existingVersion,
+							"newVersion": res.Version,
+						}).Debug("🔄 Updated package version")
+					}
+				} else {
+					addedCount++
+					log.WithFields(logrus.Fields{
+						"package": res.Name,
+						"version": res.Version,
+					}).Debug("✅ Added new package")
+				}
+				plugins[res.Name] = res.Version
+			} else {
+				if existingVersion, exists := themes[res.Name]; exists {
+					if existingVersion != res.Version {
+						updatedCount++
+						log.WithFields(logrus.Fields{
+							"package":    res.Name,
+							"oldVersion": existingVersion,
+							"newVersion": res.Version,
+						}).Debug("🔄 Updated package version")
+					}
+				} else {
+					addedCount++
+					log.WithFields(logrus.Fields{
+						"package": res.Name,
+						"version": res.Version,
+					}).Debug("✅ Added new package")
+				}
+				themes[res.Name] = res.Version
+			}
 		}
 	}
+
+	log.WithFields(logrus.Fields{
+		"added":   addedCount,
+		"updated": updatedCount,
+		"removed": removedCount,
+	}).Info("📊 Processing summary")
 
 	log.Infof("✅ Qualification complete. Found %d qualified plugins and %d qualified themes.", len(plugins), len(themes))
 
