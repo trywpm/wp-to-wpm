@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -177,6 +179,18 @@ func qualificationWorker(ctx context.Context, jobs <-chan [2]string, results cha
 	}
 }
 
+// sortJson sorts a map by keys and returns the map with sorted keys.
+func sortJson(data map[string]string) map[string]string {
+	sortedData := make(map[string]string)
+	sortedKeys := slices.Sorted(maps.Keys(data))
+
+	for _, k := range sortedKeys {
+		sortedData[k] = data[k]
+	}
+
+	return sortedData
+}
+
 // saveJSON saves a map to a file in indented JSON format.
 func saveJSON(filePath string, data interface{}) error {
 	file, err := json.MarshalIndent(data, "", "  ")
@@ -230,7 +244,7 @@ func runGenerator(cmd *cobra.Command, args []string) error {
 	results := make(chan *QualifiedPackage, len(allPlugins)+len(allThemes))
 	var wgQualify sync.WaitGroup
 
-	for i := 0; i < workers; i++ {
+	for range workers {
 		wgQualify.Add(1)
 		go qualificationWorker(ctx, jobs, results, &wgQualify)
 	}
@@ -278,15 +292,19 @@ func runGenerator(cmd *cobra.Command, args []string) error {
 	}
 
 	log.Info("💾 Saving output files...")
-	if err := saveJSON(pluginsJSONFile, plugins); err != nil {
+	if err := saveJSON(pluginsJSONFile, sortJson(plugins)); err != nil {
 		return err
 	}
 	log.Infof("   -> Saved %d plugins to %s", len(plugins), pluginsJSONFile)
 
-	if err := saveJSON(themesJSONFile, themes); err != nil {
+	if err := saveJSON(themesJSONFile, sortJson(themes)); err != nil {
 		return err
 	}
 	log.Infof("   -> Saved %d themes to %s", len(themes), themesJSONFile)
+
+	if len(conflicts) > 0 {
+		slices.Sort(conflicts)
+	}
 
 	if err := saveJSON(conflictsJSONFile, conflicts); err != nil {
 		return err
