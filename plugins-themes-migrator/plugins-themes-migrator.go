@@ -138,6 +138,7 @@ func checkoutPackage(ctx context.Context, svnRepoURL, packageName, packageType, 
 	_ = os.RemoveAll(localCheckoutPath)
 	cmd := exec.CommandContext(ctx, "svn", "checkout", packageSvnURL, localCheckoutPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
+		os.RemoveAll(localCheckoutPath)
 		return "", fmt.Errorf("svn checkout failed for %s: %w\noutput: %s", packageName, err, string(output))
 	}
 	return localCheckoutPath, nil
@@ -174,27 +175,6 @@ func runWpmCommand(ctx context.Context, wpmPath string, args []string, workDir s
 	return nil
 }
 
-func removeDirectoryWithRetry(path string, retries int, delay time.Duration) {
-	var err error
-	for i := range retries {
-		err = os.RemoveAll(path)
-		if err == nil {
-			log.WithField("path", path).Debug("Successfully removed temporary directory.")
-			return
-		}
-		log.WithFields(logrus.Fields{
-			"path":    path,
-			"attempt": i + 1,
-			"error":   err,
-		}).Warn("🧹 Failed to remove temporary directory, retrying...")
-		time.Sleep(delay)
-	}
-	log.WithFields(logrus.Fields{
-		"path":  path,
-		"error": err,
-	}).Error("❌ Failed to remove temporary directory after all retries.")
-}
-
 func processSinglePackage(
 	ctx context.Context,
 	packageName string,
@@ -211,7 +191,7 @@ func processSinglePackage(
 		l.WithError(err).Error("❌ checkout failed.")
 		return
 	}
-	defer removeDirectoryWithRetry(localPath, 5, 200*time.Millisecond)
+	defer os.RemoveAll(localPath)
 
 	tagsPath := localPath
 	tags, err := getPackageSvnTags(tagsPath)
