@@ -2,6 +2,43 @@
 
 set -euo pipefail
 
+# Global variables for cleanup
+temp_files=()
+cleanup_paths=()
+
+# Cleanup function
+cleanup() {
+    local exit_code=$?
+    log_warn "Cleaning up..."
+    
+    # Remove temporary checkout paths
+    for path in "${cleanup_paths[@]}"; do
+        if [[ -d "$path" ]]; then
+            log_info "Removing temporary directory: $path"
+            rm -rf "$path"
+        fi
+    done
+    
+    # Remove temporary files
+    for file in "${temp_files[@]}"; do
+        if [[ -f "$file" ]]; then
+            log_info "Removing temporary file: $file"
+            rm -f "$file"
+        fi
+    done
+    
+    if [[ $exit_code -ne 0 ]]; then
+        log_error "Script interrupted or failed with exit code $exit_code"
+    fi
+    
+    exit $exit_code
+}
+
+# Set up signal handlers
+trap cleanup EXIT
+trap 'log_warn "Received SIGINT (Ctrl+C), cleaning up..."; exit 130' INT
+trap 'log_warn "Received SIGTERM, cleaning up..."; exit 143' TERM
+
 # Color codes
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
@@ -101,19 +138,20 @@ log_info "Starting from revision: $start_rev"
 
 # initialize temporary files
 temp_file=$(mktemp)
+temp_files+=("$temp_file")
 
 # fetch svn log
 log_info "Fetching SVN log from $svn_url..."
-svn_xml_log=$(svn log --xml "$svn_url" -q -v -r "$start_rev:HEAD" 2>"$temp_file") || {
+if ! svn_xml_log=$(timeout 300 svn log --xml "$svn_url" -q -v -r "$start_rev:HEAD" 2>"$temp_file"); then
     if grep -q "has no history" "$temp_file"; then
         log_info "No new revisions found"
         echo "last_head_rev=$last_processed_rev"
         echo "updated_items="
         exit 0
     fi
-    log_error "svn command failed: $(cat "$temp_file")"
+    log_error "svn command failed or timed out: $(cat "$temp_file")"
     exit 1
-}
+fi
 
 # extract latest revision
 new_head_rev=$(echo "$svn_xml_log" | xmlstarlet sel -t -v "//logentry/@revision" -n | sort -nr | head -n1)
@@ -156,15 +194,16 @@ for item in $updated_items; do
 
     log_processing "Processing $type: $item"
     checkout_path="/tmp/$item"
+    cleanup_paths+=("$checkout_path")
 
     # checkout svn repository
     if [[ "$type" == "plugin" ]]; then
-        if ! svn checkout "$svn_url/$item/tags" "$checkout_path" -q; then
+        if ! timeout 120 svn checkout "$svn_url/$item/tags" "$checkout_path" -q; then
             log_error "Failed to checkout $type '$item' from svn. skipping"
             continue
         fi
     else
-        if ! svn checkout "$svn_url/$item" "$checkout_path" -q; then
+        if ! timeout 120 svn checkout "$svn_url/$item" "$checkout_path" -q; then
             log_error "Failed to checkout $type '$item' from svn. skipping"
             continue
         fi
@@ -179,8 +218,8 @@ for item in $updated_items; do
 
     # get latest version from API
     log_info "Fetching latest version from WordPress API..."
-    latest_version=$(curl -s "$api_url$item" | jq -r '.version')
-    if [[ -z "$latest_version" ]]; then
+    latest_version=$(timeout 30 curl -s "$api_url$item" | jq -r '.version')
+    if [[ -z "$latest_version" || "$latest_version" == "null" ]]; then
         log_error "Failed to fetch version information for $type '$item' from API"
         continue
     fi
@@ -220,6 +259,7 @@ for item in $updated_items; do
     done
 
     rm -rf "$checkout_path"
+    cleanup_paths=("${cleanup_paths[@]/$checkout_path}")
     echo
     log_success "Finished processing $type: $item"
     separator_item
