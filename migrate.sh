@@ -229,9 +229,23 @@ for item in $updated_items; do
     log_info "Processing $(echo $version_tags | wc -w) version tags for $item"
     separator_tag
 
+    # fetch versions from wpm registry
+    log_info "Fetching existing versions from wpm registry..."
+    existing_versions=$(curl -s "https://$registry/$item" | jq '.versions[].version' | tr -d '"')
+    if [[ -z "$existing_versions" ]]; then
+        log_warn "No existing versions found for $type '$item' in registry"
+        continue
+    fi
+
     for tag in $version_tags; do
         if [[ ! -d "$checkout_path/$tag" ]]; then
             log_warn "Skipping non-directory tag '$tag' for $type '$item'"
+            continue
+        fi
+
+        normalized_tag=$(echo "$tag" | awk -F. '{if (NF == 2) print $1 "." $2 ".0"; else print $0}')
+        if echo "$existing_versions" | grep -q "^$normalized_tag$"; then
+            log_warn "Version $tag for $type '$item' already exists in registry, skipping"
             continue
         fi
 
