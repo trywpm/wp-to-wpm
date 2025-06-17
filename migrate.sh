@@ -184,6 +184,9 @@ separator_item
 log_info "Starting item processing..."
 separator_item
 
+temp_dir=$(mktemp -d)
+cleanup_paths+=("$temp_dir")
+
 # process each item
 for item in $updated_items; do
     echo
@@ -193,24 +196,16 @@ for item in $updated_items; do
     fi
 
     log_processing "Processing $type: $item"
-    checkout_path="/tmp/$item"
-    cleanup_paths+=("$checkout_path")
 
-    # checkout svn repository
+    # get all tags from svn
+    version_tags=()
     if [[ "$type" == "plugin" ]]; then
-        if ! timeout 120 svn checkout "$svn_url/$item/tags" "$checkout_path" -q; then
-            log_error "Failed to checkout $type '$item' from svn. skipping"
-            continue
-        fi
+        version_tags=$(timeout 120 svn list "$svn_url/$item/tags" | sed 's:/$::')
     else
-        if ! timeout 120 svn checkout "$svn_url/$item" "$checkout_path" -q; then
-            log_error "Failed to checkout $type '$item' from svn. skipping"
-            continue
-        fi
+        version_tags=$(timeout 120 svn list "$svn_url/$item" | sed 's:/$::')
     fi
 
-    # process version tags
-    version_tags=$(ls "$checkout_path")
+    # Bail if no tags found
     if [[ -z "$version_tags" ]]; then
         log_warn "No version tags found for $type '$item', skipping"
         continue
@@ -237,22 +232,40 @@ for item in $updated_items; do
         continue
     fi
 
-    for tag in $version_tags; do
-        if [[ ! -d "$checkout_path/$tag" ]]; then
-            log_warn "Skipping non-directory tag '$tag' for $type '$item'"
-            continue
-        fi
+    checkout_path="$temp_dir/$item"
 
+    for tag in $version_tags; do
+        # check if tag is already published on wpm
         normalized_tag=$(echo "$tag" | awk -F. '{if (NF == 2) print $1 "." $2 ".0"; else print $0}')
         if echo "$existing_versions" | grep -q "^$normalized_tag$"; then
             log_warn "Version $tag for $type '$item' already exists in registry, skipping"
             continue
         fi
 
+        checkout_path="$temp_dir/$item/$tag"
+        mkdir -p "$checkout_path"
+
+        # checkout the tag from SVN
+        log_info "Checking out $type '$item' at version '$tag' from SVN"
+        if [[ "$type" == "plugin" ]]; then
+            if ! timeout 120 svn checkout "$svn_url/$item/tags/$tag" "$checkout_path" -q; then
+                rm -rf "$checkout_path"
+                log_error "Failed to checkout $type '$item' from svn. skipping"
+                continue
+            fi
+        else
+            if ! timeout 120 svn checkout "$svn_url/$item/$tag" "$checkout_path" -q; then
+                rm -rf "$checkout_path"
+                log_error "Failed to checkout $type '$item' from svn. skipping"
+                continue
+            fi
+        fi
+
         echo
         log_processing "Processing $item@$tag"
 
-        if ! wpm --cwd "$checkout_path/$tag" init --migrate --name "$item" --version "$tag" --type "$type"; then
+        if ! wpm --cwd "$checkout_path" init --migrate --name "$item" --version "$tag" --type "$type"; then
+            rm -rf "$checkout_path"
             log_error "Failed to initialize wpm for $type '$item' at version '$tag'. skipping"
             continue
         fi
@@ -264,16 +277,17 @@ for item in $updated_items; do
 
         log_info "Publishing $type '$item' at version '$tag' to registry '$registry' with dist tag '$dist_tag'"
 
-        if wpm --cwd "$checkout_path/$tag" --registry "$registry" publish --access public --tag "$dist_tag"; then
+        if wpm --cwd "$checkout_path" --registry "$registry" publish --access public --tag "$dist_tag"; then
+            rm -rf "$checkout_path"
             log_success "Published $item@$tag successfully"
         else
+            rm -rf "$checkout_path"
             log_error "Failed to publish $type '$item' at version '$tag'. skipping"
             continue
         fi
     done
 
     rm -rf "$checkout_path"
-    cleanup_paths=("${cleanup_paths[@]/$checkout_path}")
     echo
     log_success "Finished processing $type: $item"
     separator_item
