@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
+	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
@@ -264,6 +266,34 @@ func runWpmCommand(ctx context.Context, wpmPath string, args []string, workDir s
 	return nil
 }
 
+func normalizeVersion(version string) (string, error) {
+	if version == "" {
+		return "", errors.New("version cannot be empty")
+	}
+
+	// Attempt to normalize the version format to be compatible with semver.
+	// If version has more than 2 dots, we replace the last dot with a hyphen
+	// Example:
+	// 1.0.0.0 -> 1.0.0-0
+	// 1.0.0.alpha.1+build -> 1.0.0-alpha.1+build
+	parts := strings.Split(version, ".")
+	if len(parts) > 3 {
+		major := parts[0]
+		minor := parts[1]
+		patch := parts[2]
+		prerelease := strings.Join(parts[3:], ".")
+
+		version = fmt.Sprintf("%s.%s.%s-%s", major, minor, patch, prerelease)
+	}
+
+	v, err := semver.NewVersion(version)
+	if err != nil {
+		return "", errors.Wrapf(err, "invalid version format: %s", version)
+	}
+
+	return v.String(), nil
+}
+
 func processSinglePackage(
 	ctx context.Context,
 	packageName string,
@@ -297,7 +327,14 @@ func processSinglePackage(
 
 	for _, tag := range tags {
 		tagLog := l.WithField("tag", tag)
-		if _, exists := existingVersions[tag]; exists {
+
+		var normalizedTag string
+		if normalizedTag, err = normalizeVersion(tag); err != nil {
+			tagLog.WithError(err).Error("❌ failed to normalize tag version.")
+			continue
+		}
+
+		if _, exists := existingVersions[normalizedTag]; exists {
 			continue
 		}
 		tagLog.Info("🏷️ new tag found. starting migration.")
