@@ -3,14 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -28,29 +27,13 @@ const (
 	themeRepo         = "https://themes.svn.wordpress.org"
 	pluginApi         = "https://api.wordpress.org/plugins/info/1.2/?action=plugin_information&slug="
 	themeApi          = "https://api.wordpress.org/themes/info/1.2/?action=theme_information&slug="
-	pluginsJSONFile   = "plugins.json"
-	themesJSONFile    = "themes.json"
-	pluginRevFile     = ".plugin_last_rev"
-	themeRevFile      = ".theme_last_rev"
 )
 
 var (
 	log        = logrus.New()
+	nameReg    = regexp.MustCompile(`^[\w-]{3,164}$`)
 	httpClient = &http.Client{Timeout: 30 * time.Second}
 )
-
-type SvnLog struct {
-	Entries []SvnLogEntry `xml:"logentry"`
-}
-
-type SvnLogEntry struct {
-	Revision string    `xml:"revision,attr"`
-	Paths    []SvnPath `xml:"paths>path"`
-}
-
-type SvnPath struct {
-	Path string `xml:",chardata"`
-}
 
 func loadPackageList(path string) ([]string, error) {
 	var packages []string
@@ -64,24 +47,6 @@ func loadPackageList(path string) ([]string, error) {
 	return packages, nil
 }
 
-func readLastRevision(path string) (int, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0, fmt.Errorf("state file '%s' not found or unreadable: %w", path, err)
-	}
-	revStr := strings.TrimSpace(string(data))
-	rev, err := strconv.Atoi(revStr)
-	if err != nil {
-		return 0, fmt.Errorf("invalid revision number in %s: %w", path, err)
-	}
-	return rev, nil
-}
-
-func writeLastRevision(path string, revision int) error {
-	data := []byte(strconv.Itoa(revision))
-	return os.WriteFile(path, data, 0644)
-}
-
 func setupLogger(verbose bool) {
 	log.SetOutput(os.Stdout)
 	log.SetLevel(logrus.InfoLevel)
@@ -91,116 +56,6 @@ func setupLogger(verbose bool) {
 		ForceColors:     true,
 	})
 	log.Info("📝 logging to stdout")
-}
-
-func getUpdatedPackages(ctx context.Context, svnRepoURL string, startRev int) ([]string, int, error) {
-	revisionRange := fmt.Sprintf("%d:HEAD", startRev)
-	cmd := exec.CommandContext(ctx, "svn", "log", "--xml", "-q", "-v", "-r", revisionRange, svnRepoURL)
-
-	l := log.WithField("repo", svnRepoURL)
-	l.Infof("fetching svn log for revision range %s", revisionRange)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		if strings.Contains(string(output), "has no history") {
-			l.Info("no new revisions found.")
-			return []string{}, startRev - 1, nil
-		}
-		return nil, 0, fmt.Errorf("svn log failed: %w\noutput: %s", err, string(output))
-	}
-
-	var svnLog SvnLog
-	if err := xml.Unmarshal(output, &svnLog); err != nil {
-		return nil, 0, fmt.Errorf("failed to parse svn log xml: %w", err)
-	}
-
-	if len(svnLog.Entries) == 0 {
-		return []string{}, startRev - 1, nil
-	}
-
-	packageSet := make(map[string]struct{})
-	newHeadRev := 0
-	for _, entry := range svnLog.Entries {
-		rev, _ := strconv.Atoi(entry.Revision)
-		if rev > newHeadRev {
-			newHeadRev = rev
-		}
-		for _, path := range entry.Paths {
-			parts := strings.Split(strings.Trim(path.Path, "/"), "/")
-			if len(parts) > 1 {
-				packageSet[parts[0]] = struct{}{}
-			}
-		}
-	}
-
-	updatedPackages := make([]string, 0, len(packageSet))
-	for pkg := range packageSet {
-		updatedPackages = append(updatedPackages, pkg)
-	}
-	return updatedPackages, newHeadRev, nil
-}
-
-func getRemoteSvnTags(ctx context.Context, svnRepoURL, packageName, packageType string) ([]string, error) {
-	var tagsSvnURL string
-	if packageType == "plugin" {
-		tagsSvnURL = fmt.Sprintf("%s/%s/tags", strings.TrimRight(svnRepoURL, "/"), packageName)
-	} else {
-		tagsSvnURL = fmt.Sprintf("%s/%s", strings.TrimRight(svnRepoURL, "/"), packageName)
-	}
-
-	cmd := exec.CommandContext(ctx, "svn", "list", tagsSvnURL)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		if strings.Contains(string(output), "E170013") || strings.Contains(string(output), "non-existent") {
-			return []string{}, nil
-		}
-		return nil, fmt.Errorf("svn list for %s failed: %w\noutput: %s", packageName, err, string(output))
-	}
-
-	var tags []string
-	lines := strings.SplitSeq(string(output), "\n")
-	for line := range lines {
-		if trimmed := strings.Trim(line, "/ \r"); trimmed != "" {
-			tags = append(tags, trimmed)
-		}
-	}
-	return tags, nil
-}
-
-func getExistingVersions(ctx context.Context, registryURL, packageName string) (map[string]struct{}, error) {
-	versions := make(map[string]struct{})
-	url := fmt.Sprintf("https://%s/%s", registryURL, packageName)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request for %s: %w", url, err)
-	}
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch versions from %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound {
-		return versions, nil // No versions exist yet, return empty map
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("bad status from registry %s: %s", url, resp.Status)
-	}
-
-	var registryResponse struct {
-		Versions []struct {
-			Version string `json:"version"`
-		} `json:"versions"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&registryResponse); err != nil {
-		return nil, fmt.Errorf("failed to decode registry response from %s: %w", url, err)
-	}
-
-	for _, v := range registryResponse.Versions {
-		versions[v.Version] = struct{}{}
-	}
-	return versions, nil
 }
 
 func getLatestVersion(ctx context.Context, apiURL, packageName string) (string, error) {
@@ -231,23 +86,24 @@ func getLatestVersion(ctx context.Context, apiURL, packageName string) (string, 
 	return apiResponse.Version, nil
 }
 
-func checkoutTag(ctx context.Context, svnRepoURL, packageName, packageType, tag, workDir string) (string, error) {
+func checkoutPackage(ctx context.Context, svnRepoURL, packageName, packageType, workDir string) (string, error) {
 	var packageSvnURL string
-	localCheckoutPath := filepath.Join(workDir, packageName, tag)
+	localCheckoutPath := filepath.Join(workDir, packageName)
+
 	if err := os.MkdirAll(localCheckoutPath, 0755); err != nil {
 		return "", fmt.Errorf("failed to create checkout directory %s: %w", localCheckoutPath, err)
 	}
 
 	if packageType == "plugin" {
-		packageSvnURL = fmt.Sprintf("%s/%s/tags/%s", strings.TrimRight(svnRepoURL, "/"), packageName, tag)
+		packageSvnURL = fmt.Sprintf("%s/%s/tags", strings.TrimRight(svnRepoURL, "/"), packageName)
 	} else {
-		packageSvnURL = fmt.Sprintf("%s/%s/%s", strings.TrimRight(svnRepoURL, "/"), packageName, tag)
+		packageSvnURL = fmt.Sprintf("%s/%s", strings.TrimRight(svnRepoURL, "/"), packageName)
 	}
 
 	cmd := exec.CommandContext(ctx, "svn", "checkout", packageSvnURL, localCheckoutPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		os.RemoveAll(localCheckoutPath)
-		return "", fmt.Errorf("svn checkout failed for %s@%s: %w\noutput: %s", packageName, tag, err, string(output))
+		return "", fmt.Errorf("svn checkout failed for %s: %w\noutput: %s", packageName, err, string(output))
 	}
 	return localCheckoutPath, nil
 }
@@ -286,9 +142,28 @@ func normalizeVersion(version string) (string, error) {
 		version = fmt.Sprintf("%s.%s.%s-%s", major, minor, patch, prerelease)
 	}
 
+	// If version part start with 0, we remove it
+	// Example:
+	// 01.0.0 -> 1.0.0
+	// 1.01.0 -> 1.1.0
+	// 1.0.01 -> 1.0.1
+	// 1.0.01-beta -> 1.0.1-beta
+	parts = strings.Split(version, ".")
+	for i, part := range parts {
+		if len(part) > 1 && part[0] == '0' {
+			// Remove leading zero
+			parts[i] = strings.TrimLeft(part, "0")
+			if parts[i] == "" {
+				// If the part becomes empty, set it to "0"
+				parts[i] = "0"
+			}
+		}
+	}
+	version = strings.Join(parts, ".")
+
 	v, err := semver.NewVersion(version)
 	if err != nil {
-		return "", errors.Wrapf(err, "invalid version format: %s", version)
+		return "", err
 	}
 
 	return v.String(), nil
@@ -302,56 +177,59 @@ func processSinglePackage(
 	l := log.WithField("package", packageName)
 	l.Info("👷 worker started processing.")
 
-	tags, err := getRemoteSvnTags(ctx, config.SvnRepo, packageName, config.PackageType)
-	if err != nil {
-		l.WithError(err).Error("❌ could not get svn tags.")
-		return
-	}
-	if len(tags) == 0 {
-		l.Info("✅ no tags found in svn repo.")
-		return
-	}
-	l.Infof("found %d total tags in SVN.", len(tags))
-
-	existingVersions, err := getExistingVersions(ctx, config.RegistryURL, packageName)
-	if err != nil {
-		l.WithError(err).Error("❌ could not get existing versions from registry.")
+	// Check if package name is valid
+	if !nameReg.MatchString(packageName) {
+		l.Error("❌ name is not wpm registry compliant")
 		return
 	}
 
+	// First check if package is qualified by getting latest version from WordPress API
 	latestVersion, err := getLatestVersion(ctx, config.WPApi, packageName)
 	if err != nil {
-		l.WithError(err).Warn("could not get latest version from wordpress.org API.")
+		l.WithError(err).Error("❌ package not qualified - could not get latest version from wordpress.org API.")
+		return
 	}
-	l.Infof("found %d existing versions in registry. latest from wp.org is '%s'", len(existingVersions), latestVersion)
+	l.Infof("✅ package qualified - latest version from wp.org is '%s'", latestVersion)
 
-	for _, tag := range tags {
+	packagePath, err := checkoutPackage(ctx, config.SvnRepo, packageName, config.PackageType, config.WorkDir)
+	if err != nil {
+		l.WithError(err).Error("❌ could not checkout package from svn.")
+		return
+	}
+	defer os.RemoveAll(packagePath)
+
+	// Loop over directories in the checked out path
+	entries, err := os.ReadDir(packagePath)
+	if err != nil {
+		l.WithError(err).Error("❌ could not read package directory.")
+		return
+	}
+
+	tagCount := 0
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == ".svn" {
+			continue
+		}
+
+		tagCount++
+		tag := entry.Name()
+		tagPath := filepath.Join(packagePath, tag)
+
 		tagLog := l.WithField("tag", tag)
 
-		var normalizedTag string
-		if normalizedTag, err = normalizeVersion(tag); err != nil {
+		if _, err = normalizeVersion(tag); err != nil {
 			tagLog.WithError(err).Error("❌ failed to normalize tag version.")
 			continue
 		}
 
-		if _, exists := existingVersions[normalizedTag]; exists {
-			continue
-		}
-		tagLog.Info("🏷️ new tag found. starting migration.")
+		tagLog.Info("🏷️ processing tag for migration.")
 
 		func() {
 			tagCtx, cancelTag := context.WithTimeout(ctx, config.TagTimeout)
 			defer cancelTag()
 
-			localPath, err := checkoutTag(tagCtx, config.SvnRepo, packageName, config.PackageType, tag, config.WorkDir)
-			if err != nil {
-				tagLog.WithError(err).Error("❌ tag checkout failed.")
-				return
-			}
-			defer os.RemoveAll(localPath)
-
-			initArgs := []string{"init", "--migrate", "--name", packageName, "--version", tag, "--type", config.PackageType}
-			if err := runWpmCommand(tagCtx, config.WpmPath, initArgs, localPath); err != nil {
+			initArgs := []string{"init", "--existing", "--name", packageName, "--version", tag, "--type", config.PackageType}
+			if err := runWpmCommand(tagCtx, config.WpmPath, initArgs, tagPath); err != nil {
 				return
 			}
 
@@ -360,12 +238,19 @@ func processSinglePackage(
 				publishTagValue = "latest"
 			}
 			publishArgs := []string{"--registry", config.RegistryURL, "publish", "--access", "public", "--tag", publishTagValue}
-			if err := runWpmCommand(tagCtx, config.WpmPath, publishArgs, localPath); err != nil {
+			if err := runWpmCommand(tagCtx, config.WpmPath, publishArgs, tagPath); err != nil {
 				return
 			}
 			tagLog.Info("🎉 tag migrated successfully.")
 		}()
 	}
+
+	if tagCount == 0 {
+		l.Info("⚠️ no tags found in package.")
+	} else {
+		l.Infof("found %d total tags.", tagCount)
+	}
+
 	l.Info("✅ worker finished processing.")
 }
 
@@ -382,16 +267,14 @@ func migrationWorker(
 }
 
 type MigratorConfig struct {
-	PackageType       string
-	AllowedListFile   string
-	RevisionStateFile string
-	SvnRepo           string
-	WPApi             string
-	WorkDir           string
-	WpmPath           string
-	NumWorkers        int
-	TagTimeout        time.Duration
-	RegistryURL       string
+	PackageType string
+	SvnRepo     string
+	WPApi       string
+	WorkDir     string
+	WpmPath     string
+	NumWorkers  int
+	TagTimeout  time.Duration
+	RegistryURL string
 }
 
 func runMigrator(cmd *cobra.Command, args []string) error {
@@ -400,6 +283,11 @@ func runMigrator(cmd *cobra.Command, args []string) error {
 	pkgType, _ := cmd.Flags().GetString("type")
 	if pkgType != "plugin" && pkgType != "theme" {
 		return fmt.Errorf("type must be 'plugin' or 'theme'")
+	}
+
+	packageListFile, _ := cmd.Flags().GetString("package-list")
+	if packageListFile == "" {
+		return fmt.Errorf("package-list flag is required - please provide a JSON file containing array of package names")
 	}
 
 	wpmPath, err := exec.LookPath("wpm")
@@ -415,85 +303,65 @@ func runMigrator(cmd *cobra.Command, args []string) error {
 	config.TagTimeout, _ = cmd.Flags().GetDuration("tag-timeout")
 	config.RegistryURL, _ = cmd.Flags().GetString("registry")
 
+	workDir, _ := cmd.Flags().GetString("work-dir")
+	if workDir == "" {
+		tempDir, err := os.MkdirTemp("", "wpm-migration-*")
+		if err != nil {
+			return fmt.Errorf("failed to create temporary working directory: %w", err)
+		}
+		config.WorkDir = tempDir
+		log.Infof("📁 using temporary work directory: %s", tempDir)
+		defer os.RemoveAll(config.WorkDir)
+	} else {
+		if err := os.MkdirAll(workDir, 0755); err != nil {
+			return fmt.Errorf("failed to create work directory %s: %w", workDir, err)
+		}
+		config.WorkDir = workDir
+		log.Infof("📁 using work directory: %s", workDir)
+	}
+
+	// Set SVN repo and API URLs based on package type
 	if pkgType == "plugin" {
-		config.AllowedListFile = pluginsJSONFile
-		config.RevisionStateFile = pluginRevFile
 		config.SvnRepo = pluginRepo
 		config.WPApi = pluginApi
 	} else {
-		config.AllowedListFile = themesJSONFile
-		config.RevisionStateFile = themeRevFile
 		config.SvnRepo = themeRepo
 		config.WPApi = themeApi
 	}
 
-	tempDir, err := os.MkdirTemp("", "wpm-migration-*")
+	// Load package list from file
+	packageList, err := loadPackageList(packageListFile)
 	if err != nil {
-		return fmt.Errorf("failed to create temporary working directory: %w", err)
+		return fmt.Errorf("failed to load package list: %w", err)
 	}
-	config.WorkDir = tempDir
-	log.Infof("📁 using temporary work directory: %s", tempDir)
-	defer os.RemoveAll(config.WorkDir)
 
-	lastRev, err := readLastRevision(config.RevisionStateFile)
-	if err != nil {
-		return err
+	if len(packageList) == 0 {
+		return fmt.Errorf("package list is empty - please provide a non-empty JSON array of package names")
 	}
-	log.Infof("last processed revision: %d", lastRev)
+
+	log.Infof("loaded %d packages from %s: %v", len(packageList), packageListFile, packageList)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	updatedPackages, newHeadRev, err := getUpdatedPackages(ctx, config.SvnRepo, lastRev+1)
-	if err != nil {
-		return fmt.Errorf("could not determine updated packages: %w", err)
+	// Start workers
+	jobs := make(chan string, len(packageList))
+	var wg sync.WaitGroup
+	for i := 0; i < config.NumWorkers; i++ {
+		wg.Add(1)
+		go migrationWorker(ctx, jobs, &wg, config)
 	}
 
-	if newHeadRev <= lastRev {
-		log.Info("✅ repository is up-to-date. no new revisions found.")
-		return nil
+	// Send packages to workers
+	for _, pkgName := range packageList {
+		jobs <- pkgName
 	}
-	log.Infof("found %d packages with updates between revision %d and %d.", len(updatedPackages), lastRev, newHeadRev)
+	close(jobs)
 
-	allowedList, err := loadPackageList(config.AllowedListFile)
-	if err != nil {
-		return err
-	}
-	allowedSet := make(map[string]struct{}, len(allowedList))
-	for _, pkg := range allowedList {
-		allowedSet[pkg] = struct{}{}
-	}
+	// Wait for all workers to complete
+	wg.Wait()
 
-	packagesToProcess := make([]string, 0)
-	for _, pkgName := range updatedPackages {
-		if _, ok := allowedSet[pkgName]; ok {
-			packagesToProcess = append(packagesToProcess, pkgName)
-		}
-	}
-
-	if len(packagesToProcess) == 0 {
-		log.Info("✅ no updates found for packages in the allowed list.")
-	} else {
-		log.Infof("found %d allowed packages to process: %v", len(packagesToProcess), packagesToProcess)
-		jobs := make(chan string, len(packagesToProcess))
-		var wg sync.WaitGroup
-		for i := 0; i < config.NumWorkers; i++ {
-			wg.Add(1)
-			go migrationWorker(ctx, jobs, &wg, config)
-		}
-		for _, pkgName := range packagesToProcess {
-			jobs <- pkgName
-		}
-		close(jobs)
-		wg.Wait()
-	}
-
-	if err := writeLastRevision(config.RevisionStateFile, newHeadRev); err != nil {
-		return fmt.Errorf("critical: failed to save final revision state %d: %w", newHeadRev, err)
-	}
-	log.Infof("📝 updated revision state to %d in %s.", newHeadRev, config.RevisionStateFile)
-
-	log.Info("🎉 migration process complete!")
+	log.Info("🎉 initial migration process complete!")
 	return nil
 }
 
@@ -507,11 +375,15 @@ func main() {
 	}
 
 	rootCmd.Flags().StringP("type", "t", "", "type to migrate: 'plugin' or 'theme' (required)")
+	rootCmd.Flags().StringP("package-list", "p", "", "path to JSON file containing array of package names to migrate (required)")
+	rootCmd.Flags().StringP("work-dir", "d", "", "directory to use for package checkouts (defaults to /tmp/wpm-migration-*)")
 	rootCmd.Flags().IntP("workers", "w", defaultWorkers, "number of parallel migration workers")
 	rootCmd.Flags().Duration("tag-timeout", defaultTagTimeout, "timeout for migrating a single tag")
 	rootCmd.Flags().BoolP("verbose", "v", false, "enable verbose logging with full timestamps")
 	rootCmd.Flags().StringP("registry", "r", "registry.wpm.so", "wpm registry url to publish to")
+
 	_ = rootCmd.MarkFlagRequired("type")
+	_ = rootCmd.MarkFlagRequired("package-list")
 
 	if err := rootCmd.Execute(); err != nil {
 		log.Errorf("❌ %v", err)
