@@ -127,6 +127,11 @@ func normalizeVersion(version string) (string, error) {
 		return "", errors.New("version cannot be empty")
 	}
 
+	v, err := semver.NewVersion(version)
+	if err == nil {
+		return version, nil // Already a valid semver version
+	}
+
 	// Attempt to normalize the version format to be compatible with semver.
 	// If version has more than 2 dots, we replace the last dot with a hyphen
 	// Example:
@@ -161,7 +166,7 @@ func normalizeVersion(version string) (string, error) {
 	}
 	version = strings.Join(parts, ".")
 
-	v, err := semver.NewVersion(version)
+	v, err = semver.NewVersion(version)
 	if err != nil {
 		return "", err
 	}
