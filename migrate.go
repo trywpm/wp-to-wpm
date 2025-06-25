@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/pkg/errors"
@@ -129,7 +130,7 @@ func normalizeVersion(version string) (string, error) {
 
 	v, err := semver.NewVersion(version)
 	if err == nil {
-		return version, nil // Already a valid semver version
+		return v.String(), nil
 	}
 
 	// Attempt to normalize the version format to be compatible with semver.
@@ -153,14 +154,36 @@ func normalizeVersion(version string) (string, error) {
 	// 1.01.0 -> 1.1.0
 	// 1.0.01 -> 1.0.1
 	// 1.0.01-beta -> 1.0.1-beta
+	// Split version into parts
 	parts = strings.Split(version, ".")
 	for i, part := range parts {
+		// Check if part starts with '0' and has more characters
 		if len(part) > 1 && part[0] == '0' {
-			// Remove leading zero
-			parts[i] = strings.TrimLeft(part, "0")
-			if parts[i] == "" {
-				// If the part becomes empty, set it to "0"
-				parts[i] = "0"
+			// Split part into numeric and non-numeric (e.g., "01-beta" -> "01" and "-beta")
+			numericPart := part
+			nonNumericPart := ""
+			if hyphenIndex := strings.Index(part, "-"); hyphenIndex != -1 {
+				numericPart = part[:hyphenIndex]
+				nonNumericPart = part[hyphenIndex:]
+			}
+
+			// Check if numeric part is all digits and starts with '0'
+			isNumeric := true
+			for _, r := range numericPart {
+				if !unicode.IsDigit(r) {
+					isNumeric = false
+					break
+				}
+			}
+
+			if isNumeric && len(numericPart) > 1 && numericPart[0] == '0' {
+				// Remove leading zeros from numeric part
+				trimmed := strings.TrimLeft(numericPart, "0")
+				if trimmed == "" {
+					trimmed = "0"
+				}
+				// Reconstruct the part
+				parts[i] = trimmed + nonNumericPart
 			}
 		}
 	}
