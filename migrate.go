@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,9 +15,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/Masterminds/semver/v3"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
@@ -271,6 +272,11 @@ func normalizeVersion(version string) (string, error) {
 		return "", errors.New("version cannot be empty")
 	}
 
+	v, err := semver.NewVersion(version)
+	if err == nil {
+		return v.String(), nil
+	}
+
 	// Attempt to normalize the version format to be compatible with semver.
 	// If version has more than 2 dots, we replace the last dot with a hyphen
 	// Example:
@@ -286,9 +292,50 @@ func normalizeVersion(version string) (string, error) {
 		version = fmt.Sprintf("%s.%s.%s-%s", major, minor, patch, prerelease)
 	}
 
-	v, err := semver.NewVersion(version)
+	// If version part start with 0, we remove it
+	// Example:
+	// 01.0.0 -> 1.0.0
+	// 1.01.0 -> 1.1.0
+	// 1.0.01 -> 1.0.1
+	// 1.0.01-beta -> 1.0.1-beta
+	// Split version into parts
+	parts = strings.Split(version, ".")
+	for i, part := range parts {
+		// Check if part starts with '0' and has more characters
+		if len(part) > 1 && part[0] == '0' {
+			// Split part into numeric and non-numeric (e.g., "01-beta" -> "01" and "-beta")
+			numericPart := part
+			nonNumericPart := ""
+			if hyphenIndex := strings.Index(part, "-"); hyphenIndex != -1 {
+				numericPart = part[:hyphenIndex]
+				nonNumericPart = part[hyphenIndex:]
+			}
+
+			// Check if numeric part is all digits and starts with '0'
+			isNumeric := true
+			for _, r := range numericPart {
+				if !unicode.IsDigit(r) {
+					isNumeric = false
+					break
+				}
+			}
+
+			if isNumeric && len(numericPart) > 1 && numericPart[0] == '0' {
+				// Remove leading zeros from numeric part
+				trimmed := strings.TrimLeft(numericPart, "0")
+				if trimmed == "" {
+					trimmed = "0"
+				}
+				// Reconstruct the part
+				parts[i] = trimmed + nonNumericPart
+			}
+		}
+	}
+	version = strings.Join(parts, ".")
+
+	v, err = semver.NewVersion(version)
 	if err != nil {
-		return "", errors.Wrapf(err, "invalid version format: %s", version)
+		return "", err
 	}
 
 	return v.String(), nil
