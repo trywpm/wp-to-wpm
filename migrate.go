@@ -397,7 +397,7 @@ func processSinglePackage(
 			}
 			defer os.RemoveAll(localPath)
 
-			initArgs := []string{"init", "--migrate", "--name", packageName, "--version", tag, "--type", config.PackageType}
+			initArgs := []string{"init", "--existing", "--name", packageName, "--version", tag, "--type", config.PackageType}
 			if err := runWpmCommand(tagCtx, config.WpmPath, initArgs, localPath); err != nil {
 				return
 			}
