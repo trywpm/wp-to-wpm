@@ -1,0 +1,43 @@
+---
+name: migration
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: migration
+
+permissions: {}
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        type:
+          - theme
+          - plugin
+    steps:
+      - name: checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 #v4.2.2
+        with:
+          lfs: true
+
+      - name: setup wpm
+        working-directory: /tmp
+        run: |
+          wget https://github.com/trywpm/cli/releases/latest/download/wpm-linux-amd64
+          wget https://github.com/trywpm/cli/releases/latest/download/wpm-linux-amd64.sha256
+          sha256sum -c wpm-linux-amd64.sha256
+          chmod +x wpm-linux-amd64
+          sudo mv wpm-linux-amd64 /usr/local/bin/wpm
+
+      - name: wpm login
+        run: |
+          wpm auth login --token ${{ secrets.WPM_TOKEN }}
+
+      - name: run migration
+        run: ./bin/migrate --type ${{ matrix.type }} --workers 2
