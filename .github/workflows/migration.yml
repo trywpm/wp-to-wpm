@@ -36,7 +36,7 @@ jobs:
           sudo mv wpm-linux-amd64 /usr/local/bin/wpm
 
       - name: setup svn
-        run: sudo apt update && sudo apt install -y subversion
+        run: sudo apt install -y subversion
 
       - name: wpm login
         run: |
