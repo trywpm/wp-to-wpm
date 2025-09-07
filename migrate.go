@@ -102,7 +102,7 @@ func getUpdatedPackages(ctx context.Context, svnRepoURL string, startRev int) ([
 	l.Infof("fetching svn log for revision range %s", revisionRange)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		if strings.Contains(string(output), "has no history") {
+		if strings.Contains(string(output), "E160006: No such revision") {
 			l.Info("no new revisions found.")
 			return []string{}, startRev - 1, nil
 		}
