@@ -55,6 +55,7 @@ jobs:
 
       - name: commit changes
         run: |
+          git pull origin main
           git add .${{ matrix.type }}_last_rev
           git commit -m "Update .${{ matrix.type }}_last_rev" || echo "No changes to commit"
 
