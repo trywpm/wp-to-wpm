@@ -2,6 +2,8 @@
 name: migration
 
 on:
+  schedule:
+    - cron: '*/15 * * * *'
   workflow_dispatch:
 
 concurrency:
@@ -13,7 +15,8 @@ jobs:
   migrate:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
+      pull-requests: write
     strategy:
       fail-fast: false
       matrix:
@@ -44,3 +47,16 @@ jobs:
 
       - name: run migration
         run: ./bin/migrate --type ${{ matrix.type }} --workers 2
+
+      - name: set user
+        run: |
+          git config --global user.name "thelovekeshbot"
+          git config --global user.email "bots@thelovekesh.com"
+
+      - name: commit changes
+        run: |
+          git add .${{ matrix.type }}_last_rev
+          git commit -m "Update .${{ matrix.type }}_last_rev" || echo "No changes to commit"
+
+      - name: push changes
+        run: git push origin main
