@@ -245,10 +245,10 @@ func checkoutTag(ctx context.Context, svnRepoURL, packageName, packageType, tag,
 		packageSvnURL = fmt.Sprintf("%s/%s/%s", strings.TrimRight(svnRepoURL, "/"), packageName, tag)
 	}
 
-	cmd := exec.CommandContext(ctx, "svn", "checkout", packageSvnURL, localCheckoutPath)
+	cmd := exec.CommandContext(ctx, "svn", "export", packageSvnURL, localCheckoutPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		os.RemoveAll(localCheckoutPath)
-		return "", fmt.Errorf("svn checkout failed for %s@%s: %w\noutput: %s", packageName, tag, err, string(output))
+		return "", fmt.Errorf("svn export failed for %s@%s: %w\noutput: %s", packageName, tag, err, string(output))
 	}
 	return localCheckoutPath, nil
 }
