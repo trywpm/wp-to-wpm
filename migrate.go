@@ -235,9 +235,6 @@ func getLatestVersion(ctx context.Context, apiURL, packageName string) (string, 
 func checkoutTag(ctx context.Context, svnRepoURL, packageName, packageType, tag, workDir string) (string, error) {
 	var packageSvnURL string
 	localCheckoutPath := filepath.Join(workDir, packageName, tag)
-	if err := os.MkdirAll(localCheckoutPath, 0755); err != nil {
-		return "", fmt.Errorf("failed to create checkout directory %s: %w", localCheckoutPath, err)
-	}
 
 	if packageType == "plugin" {
 		packageSvnURL = fmt.Sprintf("%s/%s/tags/%s", strings.TrimRight(svnRepoURL, "/"), packageName, tag)
