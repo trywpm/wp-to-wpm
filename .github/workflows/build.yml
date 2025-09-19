@@ -1,0 +1,45 @@
+---
+name: build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  docker-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    timeout-minutes: 10
+    steps:
+      - name: checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 #v5.0.0
+
+      - name: get build date
+        run: echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_ENV
+
+      - name: setup docker buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
+
+      - name: registry login
+        uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 #v3.5.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: build and push
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 #v6.18.0
+        with:
+          context: .
+          file: ./Dockerfile
+          build-args: |
+            BUILD_DATE=${{ env.BUILD_DATE }}
+            BUILD_REVISION=${{ github.sha }}
+            BUILD_VERSION=${{ github.sha }}
+          load: false
+          push: true
+          secrets: |
+            GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
+          tags: |
+            ghcr.io/trywpm/wp-to-wpm:latest
