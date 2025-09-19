@@ -1,0 +1,34 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: '/'
+    schedule:
+      interval: weekly
+      day: saturday
+    labels:
+      - 'go'
+      - 'dependencies'
+
+  - package-ecosystem: github-actions
+    directory: '/'
+    schedule:
+      day: saturday
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - 'actions/*'
+      docker:
+        patterns:
+          - 'docker/*'
+    labels:
+      - 'dependencies'
+      - 'github-actions'
+
+  - package-ecosystem: "docker"
+    directory: '/'
+    schedule:
+      interval: "weekly"
+    labels:
+      - 'docker'
+      - 'dependencies'
