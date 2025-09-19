@@ -26,27 +26,20 @@ jobs:
     steps:
       - name: checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 #v4.2.2
-        with:
-          lfs: true
 
-      - name: setup wpm
-        working-directory: /tmp
-        run: |
-          wget https://github.com/trywpm/cli/releases/latest/download/wpm-linux-amd64
-          wget https://github.com/trywpm/cli/releases/latest/download/wpm-linux-amd64.sha256
-          sha256sum -c wpm-linux-amd64.sha256
-          chmod +x wpm-linux-amd64
-          sudo mv wpm-linux-amd64 /usr/local/bin/wpm
-
-      - name: setup svn
-        run: sudo apt install -y subversion
-
-      - name: wpm login
-        run: |
-          wpm auth login --token ${{ secrets.WPM_TOKEN }}
+      - name: pull image
+        run: docker pull ghcr.io/trywpm/wp-to-wpm:latest
 
       - name: run migration
-        run: ./bin/migrate --type ${{ matrix.type }} --workers 2
+        run: |
+          docker run --rm \
+            -e WORKERS=2 \
+            -e WPM_TOKEN=${{ secrets.WPM_TOKEN }} \
+            -e PACKAGE_TYPE=${{ matrix.type }} \
+            -v ${{ github.workspace }}:/code \
+            ghcr.io/trywpm/wp-to-wpm:latest migrate
+        env:
+          WORKERS: 2
 
       - name: set user
         run: |
