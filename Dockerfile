@@ -28,6 +28,9 @@ FROM debian@sha256:833c135acfe9521d7a0035a296076f98c182c542a2b6b5a0fd7063d355d69
 ENV DOCKER_USER=wpm
 ENV ACTION_WORKDIR=/code
 
+ARG USER_UID=1000
+ARG USER_GID=1000
+
 RUN set -ex \
     && savedAptMark="$(apt-mark showmanual)" \
     && apt-mark auto '.*' > /dev/null \
@@ -44,9 +47,8 @@ RUN set -ex \
     | xargs -r apt-mark manual \
     && apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false
 
-RUN useradd -m -s /bin/bash $DOCKER_USER \
-    && mkdir -p $ACTION_WORKDIR \
-    && chown -R $DOCKER_USER $ACTION_WORKDIR
+RUN groupadd -g $USER_GID $DOCKER_USER
+RUN useradd -rm -d /code -s /bin/bash -g $USER_GID -u $USER_UID $DOCKER_USER
 
 COPY --from=builder /usr/local/bin/wpm /usr/local/bin/wpm
 COPY --from=builder /usr/local/bin/wp-to-wpm /usr/local/bin/wp-to-wpm
