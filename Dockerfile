@@ -26,7 +26,7 @@ RUN /usr/local/go/bin/go build -o wp-to-wpm migrate.go \
 FROM debian@sha256:833c135acfe9521d7a0035a296076f98c182c542a2b6b5a0fd7063d355d696be
 
 ENV DOCKER_USER=wpm
-ENV ACTION_WORKDIR=/home/$DOCKER_USER/workspace
+ENV ACTION_WORKDIR=/code
 
 RUN set -ex \
     && savedAptMark="$(apt-mark showmanual)" \
