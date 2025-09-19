@@ -32,6 +32,8 @@ jobs:
           context: .
           file: ./Dockerfile
           build-args: |
+            USER_UID=$(id -u)
+            USER_GID=$(id -g)
             BUILD_DATE=${{ env.BUILD_DATE }}
             BUILD_REVISION=${{ github.sha }}
             BUILD_VERSION=${{ github.sha }}
