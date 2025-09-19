@@ -15,8 +15,11 @@ jobs:
       - name: checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 #v5.0.0
 
-      - name: get build date
-        run: echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_ENV
+      - name: global vars
+        run: |
+          echo "USER_UID=$(id -u)" >> $GITHUB_ENV
+          echo "USER_GID=$(id -g)" >> $GITHUB_ENV
+          echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_ENV
 
       - name: registry login
         uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 #v3.5.0
@@ -32,8 +35,8 @@ jobs:
           context: .
           file: ./Dockerfile
           build-args: |
-            USER_UID=$(id -u)
-            USER_GID=$(id -g)
+            USER_UID=${{ env.USER_UID }}
+            USER_GID=${{ env.USER_GID }}
             BUILD_DATE=${{ env.BUILD_DATE }}
             BUILD_REVISION=${{ github.sha }}
             BUILD_VERSION=${{ github.sha }}
