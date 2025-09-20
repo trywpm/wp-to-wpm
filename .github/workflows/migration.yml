@@ -15,6 +15,7 @@ jobs:
   migrate:
     runs-on: ubuntu-latest
     permissions:
+      packages: read
       contents: write
       pull-requests: write
     strategy:
