@@ -1,4 +1,4 @@
-FROM debian@sha256:fd8f5a1df07b5195613e4b9a0b6a947d3772a151b81975db27d47f093f60c6e6 AS builder
+FROM debian@sha256:72547dd722cd005a8c2aa2079af9ca0ee93aad8e589689135feaed60b0a8c08d AS builder
 
 ARG GO_VERSION=1.25.1
 
@@ -23,7 +23,7 @@ COPY migrate.go .
 RUN /usr/local/go/bin/go build -o wp-to-wpm migrate.go \
     && mv wp-to-wpm /usr/local/bin/wp-to-wpm
 
-FROM debian@sha256:fd8f5a1df07b5195613e4b9a0b6a947d3772a151b81975db27d47f093f60c6e6
+FROM debian@sha256:72547dd722cd005a8c2aa2079af9ca0ee93aad8e589689135feaed60b0a8c08d
 
 ENV DOCKER_USER=wpm
 ENV ACTION_WORKDIR=/code
