@@ -80,11 +80,11 @@ jobs:
       - name: create pull request
         run: |
           body="## Summary
-          This PR updates the themes and plugins list used for migrations.
+          This PR updates the themes and plugins list used for migrations."
           delimiter="${body//$'\n'/'%0A'}"
           echo "body<<${delimiter}" >> $GITHUB_OUTPUT
           echo "$body" >> $GITHUB_OUTPUT
           echo "${delimiter}" >> $GITHUB_OUTPUT
-          gh pr create --base ${{ github.head_ref }}" --head ${{ env.FEATURE_BRANCH }} --title "Update themes and plugins list" --body "$body" --reviewer thelovekesh
+          gh pr create --base ${{ github.head_ref }} --head ${{ env.FEATURE_BRANCH }} --title "Update themes and plugins list" --body "$body" --reviewer thelovekesh
         env:
           GH_TOKEN: ${{ github.token }}
