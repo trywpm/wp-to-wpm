@@ -18,7 +18,7 @@ env:
 jobs:
   fetch-versions:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     permissions:
       contents: write
       pull-requests: write
