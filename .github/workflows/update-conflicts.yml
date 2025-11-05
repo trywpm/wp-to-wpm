@@ -43,6 +43,9 @@ jobs:
           git checkout ${{ env.FEATURE_BRANCH }}
           git pull --no-rebase
 
+      - name: install subversion
+        run: sudo apt-get install -y subversion
+
       - name: update themes and plugins list
         shell: bash
         run: |
