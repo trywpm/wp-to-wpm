@@ -61,4 +61,6 @@ jobs:
           git commit -m "Update .${{ matrix.type }}_last_rev" || echo "No changes to commit"
 
       - name: push changes
-        run: git push origin main
+        run: |
+          git pull --rebase origin main || true
+          git push origin main

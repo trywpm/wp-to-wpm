@@ -89,6 +89,7 @@ jobs:
       - name: push changes
         if: steps.data-files.outputs.modified == 'true'
         run: |
+          git pull --rebase origin ${{ env.FEATURE_BRANCH }} || true
           git push origin ${{ env.FEATURE_BRANCH }}
 
       - name: create pull request
