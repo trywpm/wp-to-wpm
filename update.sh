@@ -1,5 +1,3 @@
-#!/usr/bin/env bash
-
 set -e
 
 readonly pkg_name_regex='^[a-z0-9]+(-[a-z0-9]+)*$'
