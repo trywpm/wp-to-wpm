@@ -9,5 +9,5 @@ wpm auth login --token ${WPM_TOKEN}
 echo "::endgroup::"
 
 echo "::group::run migration"
-wp-to-wpm --type ${PACKAGE_TYPE} --workers ${WORKERS}
+migrate-wpm --type ${PACKAGE_TYPE} --workers ${WORKERS}
 echo "::endgroup::"
