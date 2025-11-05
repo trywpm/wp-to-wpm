@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 set -e
 
-readonly PKG_NAME_REGEX='^[a-z0-9]+(-[a-z0-9]+)*$'
-readonly THEMES_INFO_API='https://api.wordpress.org/themes/info/1.2/?action=theme_information&slug='
-readonly PLUGINS_INFO_API='https://api.wordpress.org/plugins/info/1.2/?action=plugin_information&slug='
+readonly pkg_name_regex='^[a-z0-9]+(-[a-z0-9]+)*$'
+readonly themes_info_api='https://api.wordpress.org/themes/info/1.2/?action=theme_information&slug='
+readonly plugins_info_api='https://api.wordpress.org/plugins/info/1.2/?action=plugin_information&slug='
 
-readonly MAX_RETRIES=3
-readonly BASE_BACKOFF_SECONDS=5
+readonly max_retries=3
+readonly base_backoff_seconds=5
+readonly parallel_jobs=20
 
 themes_list=$(mktemp)
 plugins_list=$(mktemp)
@@ -24,6 +25,11 @@ if ! command -v svn &> /dev/null; then
   exit 1
 fi
 
+if ! command -v parallel &> /dev/null; then
+  echo "error: gnu parallel is not installed." >&2
+  exit 1
+fi
+
 if [[ ! -f "resolved.json" ]]; then
   echo "error: resolved.json not found." >&2
   exit 1
@@ -36,51 +42,54 @@ check_slug_exists() {
   local attempt=1
 
   if [[ "$type" != "theme" && "$type" != "plugin" ]]; then
-      echo "error: invalid type '$type' provided to check_slug_exists" >&2
-      return 1
+    echo "error: invalid type '$type' provided to check_slug_exists" >&2
+    return 1
   fi
 
   local url
   if [[ "$type" == "theme" ]]; then
-      url="${THEMES_INFO_API}${name}"
+    url="${themes_info_api}${name}"
   else
-      url="${PLUGINS_INFO_API}${name}"
+    url="${plugins_info_api}${name}"
   fi
 
-  while (( attempt <= MAX_RETRIES )); do
-      http_code=$(curl --silent --head --location \
-          --write-out "%{http_code}" --output /dev/null "$url")
+  while (( attempt <= max_retries )); do
+    http_code=$(curl --silent --head --location --write-out "%{http_code}" --output /dev/null "$url")
 
-      if [[ "$http_code" -eq 200 ]]; then
-          return 0
-      fi
+    if [[ "$http_code" -eq 200 ]]; then
+      return 0
+    fi
 
-      if (( http_code >= 500 && http_code < 600 )); then
-          echo "server error ($http_code) for ${url}., retrying..." >&2
-          local sleep_duration=$((attempt * BASE_BACKOFF_SECONDS))
-          sleep "$sleep_duration"
-      else
-          # return since we only want 200 to include the plugin or theme in the list
-          return 1
-      fi
-      ((attempt++))
+    if (( http_code >= 500 && http_code < 600 )); then
+      echo "server error ($http_code) for ${url}., retrying..." >&2
+      local sleep_duration=$((attempt * base_backoff_seconds))
+      sleep "$sleep_duration"
+    else
+      # return since we only want 200 to include the plugin or theme in the list
+      return 1
+    fi
+
+    ((attempt++))
   done
 
   echo "error: exceeded maximum retries for ${url}, falling back to previous data." >&2
 
   local json_file
   if [[ "$type" == "theme" ]]; then
-      json_file="themes.json"
+    json_file="themes.json"
   else
-      json_file="plugins.json"
+    json_file="plugins.json"
   fi
 
   if [[ -f "$json_file" ]] && jq -e --arg name "$name" 'index($name)' "$json_file" > /dev/null; then
-      return 0
+    return 0
   fi
 
   return 1
 }
+
+export -f check_slug_exists
+export themes_info_api plugins_info_api max_retries base_backoff_seconds
 
 echo "fetching themes and plugins lists..."
 svn list https://themes.svn.wordpress.org | sed 's:/$::' | sort > "$themes_list" &
@@ -101,7 +110,7 @@ if [[ ! -s "$plugins_list" ]]; then
   exit 1
 fi
 
-echo "Comparing themes and plugins lists..."
+echo "comparing themes and plugins lists..."
 comm -12 "$themes_list" "$plugins_list" \
   | jq -R -s 'split("\n") | map(select(length > 0))' > conflicts.json
 echo "updated conflicts.json"
@@ -109,56 +118,38 @@ echo "updated conflicts.json"
 process_plugins() {
   echo "updating plugins.json..."
 
-  local plugins=()
+  local valid_plugins
+  valid_plugins=$(grep -E "$pkg_name_regex" "$plugins_list" | \
+    parallel --jobs "$parallel_jobs" 'check_slug_exists "plugin" "{}" && echo "{}"')
 
-  while IFS= read -r plugin || [[ -n "$plugin" ]]; do
-      if ! [[ $plugin =~ $PKG_NAME_REGEX ]]; then
-          continue
-      fi
-
-      if ! check_slug_exists "plugin" "${plugin}"; then
-          continue
-      fi
-      plugins+=("$plugin")
-  done < "$plugins_list"
-
-  printf '%s\n' "${plugins[@]}" | jq \
-      --slurpfile conflicts conflicts.json \
-      --slurpfile resolved resolved.json \
-      -R -s '
-          (split("\n") | map(select(length > 0))) as $initial_plugins |
-          ($resolved[0].plugins | map(select(. as $p | $initial_plugins | index($p)))) as $concrete_resolved_plugins |
-          ($conflicts[0] - $concrete_resolved_plugins) as $conflicts_to_remove |
-          $initial_plugins - $conflicts_to_remove
-      ' > plugins.json
+  echo "$valid_plugins" | jq \
+    --slurpfile conflicts conflicts.json \
+    --slurpfile resolved resolved.json \
+    -R -s '
+      (split("\n") | map(select(length > 0))) as $initial_plugins |
+      ($resolved[0].plugins | map(select(. as $p | $initial_plugins | index($p)))) as $concrete_resolved_plugins |
+      ($conflicts[0] - $concrete_resolved_plugins) as $conflicts_to_remove |
+      $initial_plugins - $conflicts_to_remove
+    ' > plugins.json
   echo "updated plugins.json"
 }
 
 process_themes() {
   echo "updating themes.json..."
 
-  local themes=()
+  local valid_themes
+  valid_themes=$(grep -E "$pkg_name_regex" "$themes_list" | \
+    parallel --jobs "$parallel_jobs" 'check_slug_exists "theme" "{}" && echo "{}"')
 
-  while IFS= read -r theme || [[ -n "$theme" ]]; do
-      if ! [[ $theme =~ $PKG_NAME_REGEX ]]; then
-          continue
-      fi
-
-      if ! check_slug_exists "theme" "${theme}"; then
-          continue
-      fi
-      themes+=("$theme")
-  done < "$themes_list"
-
-  printf '%s\n' "${themes[@]}" | jq \
-      --slurpfile conflicts conflicts.json \
-      --slurpfile resolved resolved.json \
-      -R -s '
-          (split("\n") | map(select(length > 0))) as $initial_themes |
-          ($resolved[0].themes | map(select(. as $t | $initial_themes | index($t)))) as $concrete_resolved_themes |
-          ($conflicts[0] - $concrete_resolved_themes) as $conflicts_to_remove |
-          $initial_themes - $conflicts_to_remove
-      ' > themes.json
+  echo "$valid_themes" | jq \
+    --slurpfile conflicts conflicts.json \
+    --slurpfile resolved resolved.json \
+    -R -s '
+      (split("\n") | map(select(length > 0))) as $initial_themes |
+      ($resolved[0].themes | map(select(. as $t | $initial_themes | index($t)))) as $concrete_resolved_themes |
+      ($conflicts[0] - $concrete_resolved_themes) as $conflicts_to_remove |
+      $initial_themes - $conflicts_to_remove
+    ' > themes.json
   echo "updated themes.json"
 }
 
@@ -170,8 +161,8 @@ pids+=($!)
 failed=0
 for pid in "${pids[@]}"; do
   if ! wait "$pid"; then
-      echo "error: background process failed." >&2
-      failed=1
+    echo "error: background process failed." >&2
+    failed=1
   fi
 done
 
@@ -191,9 +182,9 @@ files_to_sort=(
 
 for file in "${files_to_sort[@]}"; do
   if [ -f "$file" ]; then
-      jq sort "$file" > "sorted-$file" && mv "sorted-$file" "$file"
+    jq sort "$file" > "sorted-$file" && mv "sorted-$file" "$file"
   else
-      echo "file $file does not exist, skipping."
+    echo "file $file does not exist, skipping."
   fi
 done
 
