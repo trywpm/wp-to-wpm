@@ -49,9 +49,16 @@ jobs:
       - name: update themes and plugins list
         shell: bash
         run: |
-          comm -12 \
-            <(svn list https://themes.svn.wordpress.org | sed 's:/$::' | sort) \
-            <(svn list https://plugins.svn.wordpress.org | sed 's:/$::' | sort) \
+          set -euo pipefail
+
+          themes_file=$(mktemp)
+          plugins_file=$(mktemp)
+          trap 'rm -f "$themes_file" "$plugins_file"' EXIT
+
+          svn list https://themes.svn.wordpress.org | sed 's:/$::' | sort > "$themes_file"
+          svn list https://plugins.svn.wordpress.org | sed 's:/$::' | sort > "$plugins_file"
+
+          comm -12 "$themes_file" "$plugins_file" \
             | jq -R -s 'split("\n") | map(select(length > 0))' > conflicts.json
 
           echo "updated conflicts.json"
