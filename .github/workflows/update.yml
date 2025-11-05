@@ -85,6 +85,6 @@ jobs:
           echo "body<<${delimiter}" >> $GITHUB_OUTPUT
           echo "$body" >> $GITHUB_OUTPUT
           echo "${delimiter}" >> $GITHUB_OUTPUT
-          gh pr create --base ${{ github.head_ref }} --head ${{ env.FEATURE_BRANCH }} --title "Update themes and plugins list" --body "$body" --reviewer thelovekesh
+          gh pr create --base main --head ${{ env.FEATURE_BRANCH }} --title "Update themes and plugins list" --body "$body" --reviewer thelovekesh
         env:
           GH_TOKEN: ${{ github.token }}
