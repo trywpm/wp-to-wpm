@@ -102,7 +102,7 @@ echo "updated conflicts.json"
 	echo "updating plugins.json..."
 
 	plugins=()
-	while IFS=read -r plugin; do
+	while IFS= read -r plugin; do
 		if ! [[ $plugin =~ $pkg_name_regex ]]; then
 			continue
 		fi
@@ -130,7 +130,7 @@ echo "updated conflicts.json"
 	echo "updating themes.json..."
 
 	themes=()
-	while IFS=read -r theme; do
+	while IFS= read -r theme; do
 		if ! [[ $theme =~ $pkg_name_regex ]]; then
 			continue
 		fi
