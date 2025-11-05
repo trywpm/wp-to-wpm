@@ -1,0 +1,87 @@
+---
+name: update themes and plugins list
+
+on:
+  schedule:
+    - cron: '0 5 * * 6'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.repository }}-${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions: {}
+
+env:
+  FEATURE_BRANCH: update-themes-plugins-list
+
+jobs:
+  fetch-versions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: check if feature branch exists
+        id: remote-branch
+        run: |
+          echo "exists=$([[ -z $(git ls-remote --heads origin ${{ env.FEATURE_BRANCH }}) ]] && echo "0" || echo "1")" >> $GITHUB_OUTPUT
+
+      - name: create feature branch
+        if: steps.remote-branch.outputs.exists == '0'
+        run: |
+          git checkout -b ${{ env.FEATURE_BRANCH }}
+
+      - name: checkout feature branch
+        if: steps.remote-branch.outputs.exists == '1'
+        run: |
+          git fetch --all --prune
+          git checkout ${{ env.FEATURE_BRANCH }}
+          git pull --no-rebase
+
+      - name: update themes and plugins list
+        run: bash update.sh
+
+      - name: check for changes
+        id: data-files
+        run: |
+          IS_MODIFIED=$(git ls-files --modified plugins.json themes.json conflicts.json)
+          if [ -n "$IS_MODIFIED" ]; then
+            echo "modified=true" >> $GITHUB_OUTPUT
+          else
+            echo "::notice::no files were modified"
+            exit 0
+          fi
+
+      - name: setup git user
+        if: steps.data-files.outputs.modified == 'true'
+        run: |
+          git config --global user.name "thelovekeshbot"
+          git config --global user.email "bots@thelovekesh.com"
+
+      - name: commit changes
+        if: steps.data-files.outputs.modified == 'true'
+        run: |
+          git add plugins.json themes.json conflicts.json
+          git commit -m "update themes and plugins list on $(date -u)" --signoff
+
+      - name: push changes
+        if: steps.data-files.outputs.modified == 'true'
+        run: |
+          git push origin ${{ env.FEATURE_BRANCH }}
+
+      - name: create pull request
+        run: |
+          body="## Summary
+          This PR updates the themes and plugins list used for migrations.
+          delimiter="${body//$'\n'/'%0A'}"
+          echo "body<<${delimiter}" >> $GITHUB_OUTPUT
+          echo "$body" >> $GITHUB_OUTPUT
+          echo "${delimiter}" >> $GITHUB_OUTPUT
+          gh pr create --base ${{ github.head_ref }}" --head ${{ env.FEATURE_BRANCH }} --title "Update themes and plugins list" --body "$body" --reviewer thelovekesh
+        env:
+          GH_TOKEN: ${{ github.token }}
