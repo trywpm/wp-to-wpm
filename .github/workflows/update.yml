@@ -33,6 +33,16 @@ jobs:
       - name: checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
+      - name: registry login
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef #v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: pull image
+        run: docker pull ghcr.io/trywpm/wp-to-wpm:latest
+
       - name: check if feature branch exists
         id: remote-branch
         run: |
