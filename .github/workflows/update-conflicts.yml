@@ -1,11 +1,10 @@
 ---
-name: update themes and plugins list
+name: update themes and plugins conflicts list
 
 on:
-  workflow_run:
-    workflows: ["update themes and plugins conflicts list"]
-    types:
-      - completed
+  schedule:
+    - cron: '0 5 * * 6'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.repository }}-${{ github.workflow }}
@@ -23,12 +22,6 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-    strategy:
-      fail-fast: false
-      matrix:
-        type:
-          - theme
-          - plugin
     steps:
       - name: checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -50,18 +43,20 @@ jobs:
           git checkout ${{ env.FEATURE_BRANCH }}
           git pull --no-rebase
 
-      - name: update ${{ matrix.type }}s list
+      - name: update themes and plugins list
+        shell: bash
         run: |
-          docker run --rm \
-            -e WORKERS=100 \
-            -e PACKAGE_TYPE=${{ matrix.type }} \
-            -v ${{ github.workspace }}:/code \
-            ghcr.io/trywpm/wp-to-wpm:latest update
+          comm -12 \
+            <(svn list https://themes.svn.wordpress.org | sed 's:/$::' | sort) \
+            <(svn list https://plugins.svn.wordpress.org | sed 's:/$::' | sort) \
+            | jq -R -s 'split("\n") | map(select(length > 0))' > conflicts.json
+
+          echo "updated conflicts.json"
 
       - name: check for changes
         id: data-files
         run: |
-          IS_MODIFIED=$(git ls-files --modified ${{ matrix.type }}s.json)
+          IS_MODIFIED=$(git ls-files --modified conflicts.json)
           if [ -n "$IS_MODIFIED" ]; then
             echo "modified=true" >> $GITHUB_OUTPUT
           else
@@ -78,8 +73,8 @@ jobs:
       - name: commit changes
         if: steps.data-files.outputs.modified == 'true'
         run: |
-          git add ${{ matrix.type }}s.json conflicts.json
-          git commit -m "update ${{ matrix.type }}s list on $(date -u)" --signoff
+          git add plugins.json themes.json conflicts.json
+          git commit -m "update conflicts list on $(date -u)" --signoff
 
       - name: push changes
         if: steps.data-files.outputs.modified == 'true'
