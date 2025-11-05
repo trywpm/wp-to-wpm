@@ -13,6 +13,11 @@ themes_list=$(mktemp)
 plugins_list=$(mktemp)
 trap 'rm -f "$themes_list" "$plugins_list"' EXIT
 
+if ! command -v svn &> /dev/null; then
+	echo "error: svn command not found." >&2
+	exit 1
+fi
+
 check_slug_exists() {
 	local type=$1
 	local name=$2
