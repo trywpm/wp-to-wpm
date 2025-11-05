@@ -81,10 +81,10 @@ func getSvnList(ctx context.Context, repoURL string) ([]string, error) {
 	return list, nil
 }
 
-func filterWithRegex(slugs []string, re *regexp.Regexp) []string {
+func filterValidSlugs(slugs []string, re *regexp.Regexp) []string {
 	var filtered []string
 	for _, s := range slugs {
-		if re.MatchString(s) {
+		if re.MatchString(s) && len(s) >= 3 && len(s) <= 164 {
 			filtered = append(filtered, s)
 		}
 	}
@@ -276,8 +276,8 @@ func runUpdater(cmd *cobra.Command, args []string) error {
 	log.Info("successfully fetched svn lists.")
 
 	// filter through regex to ensure valid package names
-	validFormatThemes := filterWithRegex(themes, pkgNameRegex)
-	validFormatPlugins := filterWithRegex(plugins, pkgNameRegex)
+	validFormatThemes := filterValidSlugs(themes, pkgNameRegex)
+	validFormatPlugins := filterValidSlugs(plugins, pkgNameRegex)
 	if len(validFormatThemes) == 0 || len(validFormatPlugins) == 0 {
 		return fmt.Errorf("list is empty after regex filtering, cannot proceed")
 	}
