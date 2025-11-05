@@ -83,6 +83,16 @@ svn list https://themes.svn.wordpress.org | sed 's:/$::' | sort > "$themes_list"
 svn list https://plugins.svn.wordpress.org | sed 's:/$::' | sort > "$plugins_list" &
 wait
 
+if [[ ! -s "$themes_list" ]]; then
+	echo "error: fetched themes list is empty." >&2
+	exit 1
+fi
+
+if [[ ! -s "$plugins_list" ]]; then
+	echo "error: fetched plugins list is empty." >&2
+	exit 1
+fi
+
 echo "comparing themes and plugins lists..."
 comm -12 "$themes_list" "$plugins_list" \
 	| jq -R -s 'split("\n") | map(select(length > 0))' > conflicts.json
