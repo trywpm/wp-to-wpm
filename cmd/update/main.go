@@ -122,23 +122,43 @@ func writeJSON(path string, data interface{}) error {
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
-	defer os.Remove(tempFile.Name())
-	defer tempFile.Close()
 
 	encoder := json.NewEncoder(tempFile)
 	encoder.SetIndent("", "  ")
 
 	if err := encoder.Encode(data); err != nil {
+		tempFile.Close()
+		os.Remove(tempFile.Name())
 		return fmt.Errorf("failed to write json to temp file %s: %w", tempFile.Name(), err)
 	}
 
 	if err := tempFile.Close(); err != nil {
+		os.Remove(tempFile.Name())
 		return fmt.Errorf("failed to close temp file %s: %w", tempFile.Name(), err)
 	}
 
-	if err := os.Rename(tempFile.Name(), path); err != nil {
-		return fmt.Errorf("failed to rename temp file to %s: %w", path, err)
+	if err := os.Rename(tempFile.Name(), path); err == nil {
+		return nil
 	}
+
+	source, err := os.Open(tempFile.Name())
+	if err != nil {
+		return fmt.Errorf("failed to open source temp file for copying: %w", err)
+	}
+	defer source.Close()
+
+	destination, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("failed to create destination file for copying: %w", err)
+	}
+	defer destination.Close()
+
+	_, err = io.Copy(destination, source)
+	if err != nil {
+		return fmt.Errorf("failed to copy temp file to destination: %w", err)
+	}
+
+	os.Remove(tempFile.Name())
 
 	return nil
 }
