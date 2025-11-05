@@ -98,6 +98,9 @@ comm -12 "$themes_list" "$plugins_list" \
 	| jq -R -s 'split("\n") | map(select(length > 0))' > conflicts.json
 echo "updated conflicts.json"
 
+pids=()
+trap "kill ${pids[@]} 2>/dev/null" INT
+
 {
 	echo "updating plugins.json..."
 
@@ -124,7 +127,7 @@ echo "updated conflicts.json"
 			$initial_plugins - $conflicts_to_remove
 		' > plugins.json
 	echo "updated plugins.json"
-} &
+} & pids+=($!)
 
 {
 	echo "updating themes.json..."
@@ -152,9 +155,19 @@ echo "updated conflicts.json"
 			$initial_themes - $conflicts_to_remove
 		' > themes.json
 	echo "updated themes.json"
-} &
+} & pids+=($!)
 
-wait
+failed=0
+for pid in "${pids[@]}"; do
+	if ! wait "$pid"; then
+		failed=1
+	fi
+done
+
+if [[ "$failed" -ne 0 ]]; then
+	echo "error: one or more updates failed." >&2
+	exit 1
+fi
 
 echo "update complete."
 echo ""
