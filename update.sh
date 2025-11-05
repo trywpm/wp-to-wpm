@@ -7,7 +7,7 @@ readonly plugins_info_api='https://api.wordpress.org/plugins/info/1.2/?action=pl
 
 readonly max_retries=3
 readonly base_backoff_seconds=5
-readonly parallel_jobs=20
+readonly parallel_jobs=100
 
 themes_list=$(mktemp)
 plugins_list=$(mktemp)
@@ -120,7 +120,7 @@ process_plugins() {
 
   local valid_plugins
   valid_plugins=$(grep -E "$pkg_name_regex" "$plugins_list" | \
-    parallel --jobs "$parallel_jobs" 'check_slug_exists "plugin" "{}" && echo "{}"')
+    parallel --bar --jobs "$parallel_jobs" 'check_slug_exists "plugin" "{}" && echo "{}"')
 
   echo "$valid_plugins" | jq \
     --slurpfile conflicts conflicts.json \
@@ -139,7 +139,7 @@ process_themes() {
 
   local valid_themes
   valid_themes=$(grep -E "$pkg_name_regex" "$themes_list" | \
-    parallel --jobs "$parallel_jobs" 'check_slug_exists "theme" "{}" && echo "{}"')
+    parallel --bar --jobs "$parallel_jobs" 'check_slug_exists "theme" "{}" && echo "{}"')
 
   echo "$valid_themes" | jq \
     --slurpfile conflicts conflicts.json \
@@ -153,22 +153,8 @@ process_themes() {
   echo "updated themes.json"
 }
 
-process_plugins &
-pids+=($!)
-process_themes &
-pids+=($!)
-
-failed=0
-for pid in "${pids[@]}"; do
-  if ! wait "$pid"; then
-    echo "error: background process failed." >&2
-    failed=1
-  fi
-done
-
-if [[ "$failed" -ne 0 ]]; then
-  exit 1
-fi
+process_themes
+process_plugins
 
 echo "processing complete."
 echo ""
