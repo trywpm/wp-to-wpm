@@ -143,18 +143,6 @@ func writeJSON(path string, data interface{}) error {
 	return nil
 }
 
-func findConflicts(listA, listB []string) []string {
-	setA := sliceToSet(listA)
-	var conflicts []string
-	for _, item := range listB {
-		if _, found := setA[item]; found {
-			conflicts = append(conflicts, item)
-		}
-	}
-	sort.Strings(conflicts)
-	return conflicts
-}
-
 func checkSlugExists(ctx context.Context, apiURL, slug string) bool {
 	url := apiURL + slug
 	for attempt := 0; attempt < maxRetries; attempt++ {
@@ -234,6 +222,12 @@ func runUpdater(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	var conflicts []string
+	if err := loadJSONFile(conflictsJSON, &conflicts); err != nil {
+		return fmt.Errorf("failed to read conflicts file: %w", err)
+	}
+	log.Infof("successfully loaded %d conflicts from %s", len(conflicts), conflictsJSON)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -267,12 +261,6 @@ func runUpdater(cmd *cobra.Command, args []string) error {
 	if len(validFormatThemes) == 0 || len(validFormatPlugins) == 0 {
 		return fmt.Errorf("list is empty after regex filtering, cannot proceed")
 	}
-
-	conflicts := findConflicts(validFormatThemes, validFormatPlugins)
-	if err := writeJSON(conflictsJSON, conflicts); err != nil {
-		return fmt.Errorf("failed to write conflicts file: %w", err)
-	}
-	log.Infof("found %d conflicts, updated %s", len(conflicts), conflictsJSON)
 
 	var slugsToValidate, resolvedSlugs []string
 	var apiURL, outputFilename string
