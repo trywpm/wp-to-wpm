@@ -1,61 +1,25 @@
-FROM debian@sha256:01a723bf5bfb21b9dda0c9a33e0538106e4d02cce8f557e118dd61259553d598 AS builder
-
-ARG GO_VERSION=1.25.3
+FROM golang@sha256:d3f0cf7723f3429e3f9ed846243970b20a2de7bae6a5b66fc5914e228d831bbb AS builder
 
 WORKDIR /usr/src/app
-
-RUN apt update \
-	&& apt install -y --no-install-recommends wget ca-certificates
-
-RUN wget https://github.com/trywpm/cli/releases/latest/download/wpm-linux-amd64 \
-	&& wget https://github.com/trywpm/cli/releases/latest/download/wpm-linux-amd64.sha256 \
-	&& sha256sum -c wpm-linux-amd64.sha256 \
-	&& chmod +x wpm-linux-amd64 \
-	&& mv wpm-linux-amd64 /usr/local/bin/wpm
-
-RUN wget https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz \
-	&& rm -rf /usr/local/go \
-	&& tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz \
-	&& rm go${GO_VERSION}.linux-amd64.tar.gz
-
-ENV PATH="/usr/local/go/bin:${PATH}"
 
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY cmd ./cmd
 
-RUN CGO_ENABLED=0 GOOS=linux go build -a -ldflags="-w -s" -o wpm-migrate cmd/migrate/main.go
 RUN CGO_ENABLED=0 GOOS=linux go build -a -ldflags="-w -s" -o wpm-update cmd/update/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -a -ldflags="-w -s" -o wpm-migrate cmd/migrate/main.go
 
-FROM debian@sha256:01a723bf5bfb21b9dda0c9a33e0538106e4d02cce8f557e118dd61259553d598
+FROM alpine@sha256:4b7ce07002c69e8f3d704a9c5d6fd3053be500b7f1c69fc0d80990c2ad8dd412
 
-ENV DOCKER_USER=wpm
-ENV ACTION_WORKDIR=/code
+RUN --mount=type=cache,target=/var/cache/apk \
+	apk add --update-cache subversion
 
-ARG USER_UID=1000
-ARG USER_GID=1000
+RUN addgroup -S loki && adduser -S loki -G loki \
+	&& mkdir -p /code \
+	&& chown loki:loki /code
 
-RUN set -ex \
-	&& savedAptMark="$(apt-mark showmanual)" \
-	&& apt-mark auto '.*' > /dev/null \
-	&& apt update \
-	&& apt install -y --no-install-recommends ca-certificates subversion \
-	&& rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
-	&& { [ -z "$savedAptMark" ] || apt-mark manual $savedAptMark > /dev/null; } \
-	&& find /usr/local -type f -executable -exec ldd '{}' ';' \
-	| awk '/=>/ { print $(NF-1) }' \
-	| sort -u \
-	| xargs -r dpkg-query --search \
-	| cut -d: -f1 \
-	| sort -u \
-	| xargs -r apt-mark manual \
-	&& apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false
-
-RUN groupadd -g $USER_GID $DOCKER_USER
-RUN useradd -rm -d /code -s /bin/bash -g $USER_GID -u $USER_UID $DOCKER_USER
-
-COPY --from=builder /usr/local/bin/wpm /usr/local/bin/wpm
+COPY --from=trywpm/cli:latest / /usr/local/bin/
 COPY --from=builder /usr/src/app/wpm-update /usr/local/bin/update-wpm
 COPY --from=builder /usr/src/app/wpm-migrate /usr/local/bin/migrate-wpm
 
@@ -65,8 +29,8 @@ COPY migrate.sh /usr/local/bin/migrate
 RUN chmod +x /usr/local/bin/update
 RUN chmod +x /usr/local/bin/migrate
 
-USER $DOCKER_USER
+USER loki
 
-WORKDIR $ACTION_WORKDIR
+WORKDIR /code
 
 CMD ["/usr/local/bin/migrate"]
