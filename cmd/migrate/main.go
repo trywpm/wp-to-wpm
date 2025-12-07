@@ -189,9 +189,7 @@ func getExistingVersions(ctx context.Context, registryURL, packageName string) (
 	}
 
 	var registryResponse struct {
-		Versions []struct {
-			Version string `json:"version"`
-		} `json:"versions"`
+		Versions []string `json:"versions"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&registryResponse); err != nil {
@@ -199,8 +197,9 @@ func getExistingVersions(ctx context.Context, registryURL, packageName string) (
 	}
 
 	for _, v := range registryResponse.Versions {
-		versions[v.Version] = struct{}{}
+		versions[v] = struct{}{}
 	}
+
 	return versions, nil
 }
 
