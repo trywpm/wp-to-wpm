@@ -1,380 +1,280 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
+	"maps"
 	"net/http"
 	"os"
-	"os/exec"
-	"regexp"
-	"sort"
-	"strings"
-	"sync"
-	"sync/atomic"
+	"path/filepath"
+	"slices"
 	"time"
 
-	"github.com/sirupsen/logrus"
-	"github.com/spf13/cobra"
+	"golang.org/x/net/html"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
-	themeRepoURL   = "https://themes.svn.wordpress.org"
-	pluginRepoURL  = "https://plugins.svn.wordpress.org"
-	themeAPIURL    = "https://api.wordpress.org/themes/info/1.2/?action=theme_information&slug="
-	pluginAPIURL   = "https://api.wordpress.org/plugins/info/1.2/?action=plugin_information&slug="
-	resolvedJSON   = "resolved.json"
-	conflictsJSON  = "conflicts.json"
-	pluginsJSON    = "plugins.json"
-	themesJSON     = "themes.json"
-	maxRetries     = 3
-	baseBackoff    = 5 * time.Second
-	defaultWorkers = 50
-	progressChunk  = 1000
+	// output files.
+	themesJson    = "themes.json"
+	pluginsJson   = "plugins.json"
+	resolvedJson  = "resolved.json"
+	conflictsJson = "conflicts.json"
+
+	// svn repos.
+	themesSvnRepo  = "https://themes.svn.wordpress.org/"
+	pluginsSvnRepo = "https://plugins.svn.wordpress.org/"
 )
 
 var (
-	log          = logrus.New()
-	httpClient   = &http.Client{Timeout: 30 * time.Second}
-	pkgNameRegex = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+	hrefBytes   = []byte("href")
+	parentBytes = []byte("../")
+	httpClient  = &http.Client{}
 )
 
 type resolvedConfig struct {
-	Plugins []string `json:"plugins"`
 	Themes  []string `json:"themes"`
+	Plugins []string `json:"plugins"`
 }
 
-func setupLogger() {
-	log.SetOutput(os.Stdout)
-	log.SetLevel(logrus.InfoLevel)
-	log.SetFormatter(&logrus.TextFormatter{
-		FullTimestamp:   false,
-		TimestampFormat: "2006-01-02 15:04:05",
-		ForceColors:     true,
-	})
-}
-
-func getSvnList(ctx context.Context, repoURL string) ([]string, error) {
-	cmd := exec.CommandContext(ctx, "svn", "list", repoURL)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("svn list for repo %s failed: %w\noutput: %s", repoURL, err, string(output))
+func isValidPackageName(name []byte) bool {
+	n := len(name)
+	if n < 3 || n > 164 {
+		return false
 	}
 
-	var list []string
-	scanner := bufio.NewScanner(bytes.NewReader(output))
-	for scanner.Scan() {
-		line := strings.Trim(scanner.Text(), "/ \r\n")
-		if line != "" {
-			list = append(list, line)
-		}
-	}
+	for i := range n {
+		c := name[i]
 
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("failed to read svn list output: %w", err)
-	}
-
-	sort.Strings(list)
-	return list, nil
-}
-
-func filterValidSlugs(slugs []string, re *regexp.Regexp) []string {
-	var filtered []string
-	for _, s := range slugs {
-		if re.MatchString(s) && len(s) >= 3 && len(s) <= 164 {
-			filtered = append(filtered, s)
-		}
-	}
-	return filtered
-}
-
-func loadJSONFile(path string, v interface{}) error {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		// For optional files like resolved.json, we don't treat this as a fatal error.
-		// We log it and the calling function will proceed with empty data.
-		log.Warnf("file %s not found, proceeding with empty data.", path)
-		return nil
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("failed to read file %s: %w", path, err)
-	}
-
-	// Handle empty file case
-	if len(data) == 0 {
-		log.Warnf("file %s is empty, proceeding with empty data.", path)
-		return nil
-	}
-
-	if err := json.Unmarshal(data, v); err != nil {
-		return fmt.Errorf("failed to parse json from %s: %w", path, err)
-	}
-	return nil
-}
-
-func writeJSON(path string, data interface{}) error {
-	dir := os.TempDir()
-	tempFile, err := os.CreateTemp(dir, "temp-*.json")
-	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
-	}
-
-	encoder := json.NewEncoder(tempFile)
-	encoder.SetIndent("", "  ")
-
-	if err := encoder.Encode(data); err != nil {
-		tempFile.Close()
-		os.Remove(tempFile.Name())
-		return fmt.Errorf("failed to write json to temp file %s: %w", tempFile.Name(), err)
-	}
-
-	if err := tempFile.Close(); err != nil {
-		os.Remove(tempFile.Name())
-		return fmt.Errorf("failed to close temp file %s: %w", tempFile.Name(), err)
-	}
-
-	if err := os.Rename(tempFile.Name(), path); err == nil {
-		return nil
-	}
-
-	source, err := os.Open(tempFile.Name())
-	if err != nil {
-		return fmt.Errorf("failed to open source temp file for copying: %w", err)
-	}
-	defer source.Close()
-
-	destination, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("failed to create destination file for copying: %w", err)
-	}
-	defer destination.Close()
-
-	_, err = io.Copy(destination, source)
-	if err != nil {
-		return fmt.Errorf("failed to copy temp file to destination: %w", err)
-	}
-
-	os.Remove(tempFile.Name())
-
-	return nil
-}
-
-func checkSlugExists(ctx context.Context, apiURL, slug string) bool {
-	url := apiURL + slug
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
-		if err != nil {
-			log.WithError(err).WithField("slug", slug).Warn("failed to create request")
-			return false // Don't retry on request creation failure
-		}
-
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			log.WithError(err).WithField("slug", slug).Warnf("request failed, retrying...")
-			time.Sleep(baseBackoff) // Generic backoff for network errors
+		// check for allowed characters a-z
+		if c >= 'a' && c <= 'z' {
 			continue
 		}
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
 
-		if resp.StatusCode == http.StatusOK {
-			return true
+		// check for allowed characters 0-9
+		if c >= '0' && c <= '9' {
+			continue
 		}
 
-		if resp.StatusCode >= 500 && resp.StatusCode < 600 {
-			log.Warnf("server error (%d) for %s, retrying (%d/%d)...", resp.StatusCode, url, attempt+1, maxRetries)
-			time.Sleep(time.Duration(attempt+1) * baseBackoff)
-		} else {
-			// Any other status code (e.g., 404) is a definitive failure
-			return false
+		// check for allowed special characters `-`
+		if c == '-' {
+			if i == 0 || i == n-1 || name[i-1] == '-' {
+				return false
+			}
+			continue
 		}
+
+		return false
 	}
-	log.Errorf("exceeded maximum retries for %s, marking as invalid.", url)
-	return false
+
+	return true
 }
 
-func slugValidatorWorker(
-	ctx context.Context,
-	jobs <-chan string,
-	results chan<- string,
-	wg *sync.WaitGroup,
-	processed *atomic.Int64,
-	total int,
-	apiURL string,
-) {
-	defer wg.Done()
-	for slug := range jobs {
-		if checkSlugExists(ctx, apiURL, slug) {
-			results <- slug
-		}
-		count := processed.Add(1)
-		if count%progressChunk == 0 || int(count) == total {
-			log.Infof("progress: processed %d / %d items.", count, total)
+func getSvnList(ctx context.Context, svnRepo string) (map[string]struct{}, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, svnRepo, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch data from %s: %w", svnRepo, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to fetch repo %s, status code: %d", svnRepo, resp.StatusCode)
+	}
+
+	list := make(map[string]struct{})
+	z := html.NewTokenizer(resp.Body)
+
+	for {
+		switch z.Next() {
+		case html.ErrorToken:
+			err := z.Err()
+			if errors.Is(err, io.EOF) {
+				return list, nil
+			}
+			return nil, fmt.Errorf("error tokenizing html from %s: %w", svnRepo, err)
+
+		case html.StartTagToken:
+			name, hasAttr := z.TagName()
+			if !hasAttr || len(name) != 1 || name[0] != 'a' {
+				continue
+			}
+
+			for {
+				k, v, more := z.TagAttr()
+				if bytes.Equal(k, hrefBytes) {
+					if len(v) > 1 && v[len(v)-1] == '/' && !bytes.Equal(v, parentBytes) {
+						slug := v[:len(v)-1]
+						if isValidPackageName(slug) {
+							list[string(slug)] = struct{}{}
+						}
+					}
+					break
+				}
+				if !more {
+					break
+				}
+			}
 		}
 	}
 }
 
-// sliceToSet converts a string slice to a map for efficient lookups.
-func sliceToSet(slice []string) map[string]struct{} {
-	set := make(map[string]struct{}, len(slice))
-	for _, item := range slice {
-		set[item] = struct{}{}
+func readJson(filename string, dest any) error {
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("failed to read file %s: %w", filename, err)
 	}
-	return set
+
+	if len(data) == 0 {
+		return nil
+	}
+
+	if err := json.Unmarshal(data, dest); err != nil {
+		return fmt.Errorf("failed to unmarshal json from file %s: %w", filename, err)
+	}
+
+	return nil
 }
 
-func runUpdater(cmd *cobra.Command, args []string) error {
-	setupLogger()
-
-	pkgType, _ := cmd.Flags().GetString("type")
-	workers, _ := cmd.Flags().GetInt("workers")
-
-	if _, err := exec.LookPath("svn"); err != nil {
-		return fmt.Errorf("svn command not found in PATH")
+func writeJson(path string, data any) error {
+	dir := filepath.Dir(path)
+	if dir == "" {
+		dir = "."
 	}
 
-	var resolvedConf resolvedConfig
-	if err := loadJSONFile(resolvedJSON, &resolvedConf); err != nil {
-		return err
+	tmp, err := os.CreateTemp(dir, ".tmp-*.json")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file in %s: %w", dir, err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+
+	encoder := json.NewEncoder(tmp)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("failed to encode json to %s: %w", tmpName, err)
 	}
 
-	var conflicts []string
-	if err := loadJSONFile(conflictsJSON, &conflicts); err != nil {
-		return fmt.Errorf("failed to read conflicts file: %w", err)
-	}
-	log.Infof("successfully loaded %d conflicts from %s", len(conflicts), conflictsJSON)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	var wg sync.WaitGroup
-	var themes, plugins []string
-	var themesErr, pluginsErr error
-
-	log.Info("fetching themes and plugins lists from svn...")
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		themes, themesErr = getSvnList(ctx, themeRepoURL)
-	}()
-	go func() {
-		defer wg.Done()
-		plugins, pluginsErr = getSvnList(ctx, pluginRepoURL)
-	}()
-	wg.Wait()
-
-	if themesErr != nil {
-		return fmt.Errorf("could not fetch themes list: %w", themesErr)
-	}
-	if pluginsErr != nil {
-		return fmt.Errorf("could not fetch plugins list: %w", pluginsErr)
-	}
-	log.Info("successfully fetched svn lists.")
-
-	// filter through regex to ensure valid package names
-	validFormatThemes := filterValidSlugs(themes, pkgNameRegex)
-	validFormatPlugins := filterValidSlugs(plugins, pkgNameRegex)
-	if len(validFormatThemes) == 0 || len(validFormatPlugins) == 0 {
-		return fmt.Errorf("list is empty after regex filtering, cannot proceed")
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("failed to fsync %s: %w", tmpName, err)
 	}
 
-	var slugsToValidate, resolvedSlugs []string
-	var apiURL, outputFilename string
-
-	if pkgType == "plugin" {
-		slugsToValidate = validFormatPlugins
-		resolvedSlugs = resolvedConf.Plugins
-		apiURL = pluginAPIURL
-		outputFilename = pluginsJSON
-	} else {
-		slugsToValidate = validFormatThemes
-		resolvedSlugs = resolvedConf.Themes
-		apiURL = themeAPIURL
-		outputFilename = themesJSON
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("failed to close %s: %w", tmpName, err)
 	}
 
-	totalToProcess := len(slugsToValidate)
-	log.Infof("starting remote validation for %d %s(s) with %d workers...", totalToProcess, pkgType, workers)
-
-	jobs := make(chan string, totalToProcess)
-	results := make(chan string, totalToProcess)
-	var processedCount atomic.Int64
-
-	wg.Add(workers)
-	for i := 0; i < workers; i++ {
-		go slugValidatorWorker(ctx, jobs, results, &wg, &processedCount, totalToProcess, apiURL)
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("failed to rename %s -> %s: %w", tmpName, path, err)
 	}
 
-	for _, slug := range slugsToValidate {
-		jobs <- slug
-	}
-	close(jobs)
-	wg.Wait()
-	close(results)
-
-	var validatedSlugs []string
-	for slug := range results {
-		validatedSlugs = append(validatedSlugs, slug)
-	}
-	log.Infof("remote validation complete. found %d valid slugs.", len(validatedSlugs))
-	log.Info("filtering validated slugs based on conflicts and resolutions...")
-
-	validatedSlugsSet := sliceToSet(validatedSlugs)
-
-	// find intersection of resolvedSlugs and validatedSlugs
-	var concreteResolvedSlugs []string
-	for _, slug := range resolvedSlugs {
-		if _, found := validatedSlugsSet[slug]; found {
-			concreteResolvedSlugs = append(concreteResolvedSlugs, slug)
-		}
-	}
-
-	// remove from conflicts any slug that is in concreteResolvedSlugs
-	concreteResolvedSet := sliceToSet(concreteResolvedSlugs)
-	var conflictsToRemove []string
-	for _, slug := range conflicts {
-		if _, found := concreteResolvedSet[slug]; !found {
-			conflictsToRemove = append(conflictsToRemove, slug)
-		}
-	}
-
-	// remove conflictsToRemove from validatedSlugs
-	conflictsToRemoveSet := sliceToSet(conflictsToRemove)
-	var finalSlugs []string
-	for _, slug := range validatedSlugs {
-		if _, found := conflictsToRemoveSet[slug]; !found {
-			finalSlugs = append(finalSlugs, slug)
-		}
-	}
-	sort.Strings(finalSlugs)
-
-	if err := writeJSON(outputFilename, finalSlugs); err != nil {
-		return fmt.Errorf("failed to write final list: %w", err)
-	}
-
-	log.Infof("processing complete. updated %s with %d final slugs.", outputFilename, len(finalSlugs))
 	return nil
 }
 
 func main() {
-	rootCmd := &cobra.Command{
-		Use:           "wp-list-updater",
-		Short:         "Updates lists of available WordPress plugins and themes.",
-		SilenceUsage:  true,
-		SilenceErrors: true,
-		RunE:          runUpdater,
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	eg, ctx := errgroup.WithContext(ctx)
+
+	var themes, plugins map[string]struct{}
+
+	eg.Go(func() error {
+		var err error
+		themes, err = getSvnList(ctx, themesSvnRepo)
+		return err
+	})
+	eg.Go(func() error {
+		var err error
+		plugins, err = getSvnList(ctx, pluginsSvnRepo)
+		return err
+	})
+
+	if err := eg.Wait(); err != nil {
+		log.Fatalf("failed to fetch data: %v", err)
 	}
 
-	rootCmd.Flags().StringP("type", "t", "", "type to process: 'plugin' or 'theme' (required)")
-	rootCmd.Flags().IntP("workers", "w", defaultWorkers, "number of parallel validation workers")
-	_ = rootCmd.MarkFlagRequired("type")
-
-	if err := rootCmd.Execute(); err != nil {
-		log.Errorf("❌ %v", err)
-		os.Exit(1)
+	var conflicts []string
+	for theme := range themes {
+		if _, exists := plugins[theme]; exists {
+			conflicts = append(conflicts, theme)
+		}
 	}
+
+	for _, conflict := range conflicts {
+		delete(themes, conflict)
+		delete(plugins, conflict)
+	}
+
+	var resolved resolvedConfig
+	if err := readJson(resolvedJson, &resolved); err != nil {
+		log.Fatalf("failed to read resolved config: %v", err)
+	}
+
+	resolvedThemes := make(map[string]struct{}, len(resolved.Themes))
+	for _, t := range resolved.Themes {
+		resolvedThemes[t] = struct{}{}
+	}
+	for _, p := range resolved.Plugins {
+		if _, dup := resolvedThemes[p]; dup {
+			log.Fatalf("resolved.json: %q is listed under both themes and plugins", p)
+		}
+	}
+
+	for _, conflict := range conflicts {
+		if _, ok := resolvedThemes[conflict]; ok {
+			themes[conflict] = struct{}{}
+		} else if slices.Contains(resolved.Plugins, conflict) {
+			plugins[conflict] = struct{}{}
+		}
+	}
+
+	themesList := slices.Sorted(maps.Keys(themes))
+	pluginsList := slices.Sorted(maps.Keys(plugins))
+	slices.Sort(conflicts)
+
+	if err := writeJson(themesJson, themesList); err != nil {
+		log.Fatalf("failed to write themes json: %v", err)
+	}
+	if err := writeJson(pluginsJson, pluginsList); err != nil {
+		log.Fatalf("failed to write plugins json: %v", err)
+	}
+	if err := writeJson(conflictsJson, conflicts); err != nil {
+		log.Fatalf("failed to write conflicts json: %v", err)
+	}
+
+	log.Printf("themes=%d plugins=%d conflicts=%d (resolved=%d)",
+		len(themesList), len(pluginsList), len(conflicts),
+		intersectCount(conflicts, resolvedThemes, resolved.Plugins))
+}
+
+func intersectCount(conflicts []string, resolvedThemes map[string]struct{}, resolvedPlugins []string) int {
+	resolvedPluginsSet := make(map[string]struct{}, len(resolvedPlugins))
+	for _, p := range resolvedPlugins {
+		resolvedPluginsSet[p] = struct{}{}
+	}
+	n := 0
+	for _, c := range conflicts {
+		if _, ok := resolvedThemes[c]; ok {
+			n++
+			continue
+		}
+		if _, ok := resolvedPluginsSet[c]; ok {
+			n++
+		}
+	}
+	return n
 }
