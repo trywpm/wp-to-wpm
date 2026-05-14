@@ -207,6 +207,8 @@ func main() {
 
 	ctx := context.Background()
 
+	log.Printf("fetching themes and plugins list from svn with %d workers...", workers)
+
 	eg, svnCtx := errgroup.WithContext(ctx)
 
 	var themes, plugins map[string]struct{}
@@ -275,9 +277,7 @@ func main() {
 		log.Fatalf("failed to write conflicts json: %v", err)
 	}
 
-	log.Printf("themes=%d plugins=%d conflicts=%d (resolved=%d)",
-		len(themesList), len(pluginsList), len(conflicts),
-		intersectCount(conflicts, resolvedThemes, resolved.Plugins))
+	log.Println("successfully updated themes, plugins and conflicts packages data.")
 
 	closedThemes := make(map[string]packageClosure)
 	closedPlugins := make(map[string]packageClosure)
@@ -404,7 +404,10 @@ func main() {
 	})
 
 	if err := updateEg.Wait(); err != nil {
-		log.Fatalf("failed during closures update: %v", err)
+		fmt.Println()
+		log.Printf("workers finished with some errors: %v", err)
+	} else {
+		fmt.Println()
 	}
 
 	if err := writeJson(closedThemesJson, closedThemes); err != nil {
@@ -414,7 +417,12 @@ func main() {
 		log.Fatalf("failed to write closed plugins json: %v", err)
 	}
 
-	log.Println("\nsuccessfully updated closed lists.")
+	log.Println("successfully updated closed packages data")
+
+	log.Printf("\nthemes=%d plugins=%d conflicts=%d (resolved=%d) closed-themes=%d closed-plugins=%d",
+		len(themesList), len(pluginsList), len(conflicts),
+		intersectCount(conflicts, resolvedThemes, resolved.Plugins),
+		len(closedThemes), len(closedPlugins))
 }
 
 func intersectCount(conflicts []string, resolvedThemes map[string]struct{}, resolvedPlugins []string) int {
