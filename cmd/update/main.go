@@ -419,7 +419,7 @@ func main() {
 
 	log.Println("successfully updated closed packages data")
 
-	log.Printf("\nthemes=%d plugins=%d conflicts=%d (resolved=%d) closed-themes=%d closed-plugins=%d",
+	log.Printf("themes=%d plugins=%d conflicts=%d (resolved=%d) closed-themes=%d closed-plugins=%d",
 		len(themesList), len(pluginsList), len(conflicts),
 		intersectCount(conflicts, resolvedThemes, resolved.Plugins),
 		len(closedThemes), len(closedPlugins))
