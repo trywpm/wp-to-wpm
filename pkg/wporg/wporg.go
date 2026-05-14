@@ -58,9 +58,9 @@ type Info struct {
 
 type Client struct {
 	http       *http.Client
+	sem        chan struct{}
 	maxRetries int
 	retryDelay time.Duration
-	sem        chan struct{}
 }
 
 type Options struct {
