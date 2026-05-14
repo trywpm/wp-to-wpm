@@ -17,16 +17,16 @@ const (
 	filePerm = 0644
 
 	// data files.
-	StoreThemes        StoreFile = "themes.json"
-	StorePlugins       StoreFile = "plugins.json"
-	StoreResolved      StoreFile = "resolved.json"
-	StoreConflicts     StoreFile = "conflicts.json"
-	StoreClosedThemes  StoreFile = "closed-themes.json"
-	StoreClosedPlugins StoreFile = "closed-plugins.json"
+	Themes        StoreFile = "themes.json"
+	Plugins       StoreFile = "plugins.json"
+	Resolved      StoreFile = "resolved.json"
+	Conflicts     StoreFile = "conflicts.json"
+	ClosedThemes  StoreFile = "closed-themes.json"
+	ClosedPlugins StoreFile = "closed-plugins.json"
 
 	// svn state files.
-	StoreThemeSvnRepoRev  StoreFile = ".theme_last_rev"
-	StorePluginSvnRepoRev StoreFile = ".plugin_last_rev"
+	ThemeSvnRepoRev  StoreFile = ".theme_last_rev"
+	PluginSvnRepoRev StoreFile = ".plugin_last_rev"
 )
 
 func (sf StoreFile) Path() string {
@@ -35,7 +35,7 @@ func (sf StoreFile) Path() string {
 
 func (sf StoreFile) IsDataFile() bool {
 	switch sf {
-	case StoreThemes, StorePlugins, StoreResolved, StoreConflicts, StoreClosedThemes, StoreClosedPlugins:
+	case Themes, Plugins, Resolved, Conflicts, ClosedThemes, ClosedPlugins:
 		return true
 	default:
 		return false
@@ -44,7 +44,7 @@ func (sf StoreFile) IsDataFile() bool {
 
 func (sf StoreFile) IsSvnStateFile() bool {
 	switch sf {
-	case StoreThemeSvnRepoRev, StorePluginSvnRepoRev:
+	case ThemeSvnRepoRev, PluginSvnRepoRev:
 		return true
 	default:
 		return false
@@ -67,9 +67,9 @@ func (pt PackageType) Valid() bool {
 func (pt PackageType) revFile() (StoreFile, error) {
 	switch pt {
 	case Theme:
-		return StoreThemeSvnRepoRev, nil
+		return ThemeSvnRepoRev, nil
 	case Plugin:
-		return StorePluginSvnRepoRev, nil
+		return PluginSvnRepoRev, nil
 	default:
 		return "", fmt.Errorf("invalid package type: %s", pt)
 	}
