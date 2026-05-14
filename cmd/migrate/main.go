@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"encoding/xml"
@@ -39,10 +40,6 @@ var (
 	log        = logrus.New()
 	httpClient = &http.Client{Timeout: 30 * time.Second}
 )
-
-type SvnLog struct {
-	Entries []SvnLogEntry `xml:"logentry"`
-}
 
 type SvnLogEntry struct {
 	Revision string    `xml:"revision,attr"`
@@ -96,47 +93,83 @@ func setupLogger(verbose bool) {
 
 func getUpdatedPackages(ctx context.Context, svnRepoURL string, startRev int) ([]string, int, error) {
 	revisionRange := fmt.Sprintf("%d:HEAD", startRev)
-	cmd := exec.CommandContext(ctx, "svn", "log", "--xml", "-q", "-v", "-r", revisionRange, svnRepoURL)
 
-	l := log.WithField("repo", svnRepoURL)
-	l.Infof("fetching svn log for revision range %s", revisionRange)
-	output, err := cmd.CombinedOutput()
+	cmd := exec.CommandContext(ctx, "svn", "log", "--xml", "-q", "-v", "--non-interactive", "-r", revisionRange, svnRepoURL)
+
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
+
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		if strings.Contains(string(output), "E160006: No such revision") {
-			l.Info("no new revisions found.")
-			return []string{}, startRev - 1, nil
-		}
-		return nil, 0, fmt.Errorf("svn log failed: %w\noutput: %s", err, string(output))
+		return nil, 0, fmt.Errorf("failed to create stdout pipe: %w", err)
 	}
 
-	var svnLog SvnLog
-	if err := xml.Unmarshal(output, &svnLog); err != nil {
-		return nil, 0, fmt.Errorf("failed to parse svn log xml: %w", err)
-	}
-
-	if len(svnLog.Entries) == 0 {
-		return []string{}, startRev - 1, nil
+	if err := cmd.Start(); err != nil {
+		return nil, 0, fmt.Errorf("failed to start svn command: %w", err)
 	}
 
 	packageSet := make(map[string]struct{})
 	newHeadRev := 0
-	for _, entry := range svnLog.Entries {
-		rev, _ := strconv.Atoi(entry.Revision)
-		if rev > newHeadRev {
-			newHeadRev = rev
+
+	decoder := xml.NewDecoder(stdout)
+	for {
+		t, err := decoder.Token()
+		if err == io.EOF {
+			break
 		}
-		for _, path := range entry.Paths {
-			parts := strings.Split(strings.Trim(path.Path, "/"), "/")
-			if len(parts) > 1 {
-				packageSet[parts[0]] = struct{}{}
+		if err != nil {
+			break
+		}
+
+		// Look for <logentry> tags
+		switch se := t.(type) {
+		case xml.StartElement:
+			if se.Name.Local == "logentry" {
+				var entry SvnLogEntry
+				if err := decoder.DecodeElement(&entry, &se); err != nil {
+					return nil, 0, fmt.Errorf("failed to decode svn log entry: %w", err)
+				}
+
+				rev, err := strconv.Atoi(entry.Revision)
+				if err != nil {
+					return nil, 0, fmt.Errorf("failed to parse revision %q: %w", entry.Revision, err)
+				}
+
+				if rev > newHeadRev {
+					newHeadRev = rev
+				}
+
+				for _, p := range entry.Paths {
+					parts := strings.Split(strings.Trim(p.Path, "/"), "/")
+					if len(parts) > 1 {
+						packageSet[parts[0]] = struct{}{}
+					}
+				}
 			}
 		}
+	}
+
+	if err := cmd.Wait(); err != nil {
+		errMsg := stderrBuf.String()
+
+		if strings.Contains(errMsg, "E160006") {
+			return []string{}, startRev - 1, nil
+		}
+
+		return nil, 0, fmt.Errorf("svn log failed: %w\nstderr: %s", err, errMsg)
+	}
+
+	if newHeadRev == 0 {
+		return []string{}, startRev - 1, nil
 	}
 
 	updatedPackages := make([]string, 0, len(packageSet))
 	for pkg := range packageSet {
 		updatedPackages = append(updatedPackages, pkg)
 	}
+
 	return updatedPackages, newHeadRev, nil
 }
 
