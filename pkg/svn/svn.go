@@ -20,7 +20,7 @@ var (
 	parentBytes = []byte("../")
 )
 
-func getSvnList(ctx context.Context, svnRepo string) (map[string]struct{}, error) {
+func List(ctx context.Context, svnRepo string, isValid func([]byte) bool) (map[string]struct{}, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, svnRepo, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -59,6 +59,11 @@ func getSvnList(ctx context.Context, svnRepo string) (map[string]struct{}, error
 				if bytes.Equal(k, hrefBytes) {
 					if len(v) > 1 && v[len(v)-1] == '/' && !bytes.Equal(v, parentBytes) {
 						slug := v[:len(v)-1]
+
+						if isValid != nil && !isValid(slug) {
+							continue
+						}
+
 						list[string(slug)] = struct{}{}
 					}
 					break
