@@ -1,0 +1,62 @@
+---
+name: migrate
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: migrate-pipeline
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: read
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        type:
+          - theme
+          - plugin
+    steps:
+      - name: checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: registry login
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: pull image
+        run: docker pull ghcr.io/trywpm/wp-to-wpm:latest
+
+      - name: run migration
+        run: |
+          docker run --rm \
+            -e CONCURRENCY=2 \
+            -e WPM_TOKEN=${{ secrets.WPM_TOKEN }} \
+            -e PACKAGE_TYPE=${{ matrix.type }} \
+            -v ${{ github.workspace }}:/code \
+            ghcr.io/trywpm/wp-to-wpm:latest migrate
+
+      - name: setup git user
+        run: |
+          git config --global user.name "thelovekeshbot"
+          git config --global user.email "bots@thelovekesh.com"
+
+      - name: commit state
+        run: |
+          git pull origin main
+          git add .${{ matrix.type }}_last_rev
+          git diff --cached --quiet || git commit -m "migrate(${{ matrix.type }}): advance svn revision pointer"
+
+      - name: push
+        run: |
+          git pull --rebase origin main || true
+          git push origin main
