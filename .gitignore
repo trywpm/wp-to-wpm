@@ -1,2 +1,3 @@
-migrator-activity.log
 .temp
+pending-backfill-themes.txt
+pending-backfill-plugins.txt
