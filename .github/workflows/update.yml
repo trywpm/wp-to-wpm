@@ -3,6 +3,11 @@ name: update
 
 on:
   workflow_dispatch:
+    inputs:
+      revalidate:
+        description: 'Prune non-permanent closures before update'
+        type: boolean
+        default: false
 
 concurrency:
   group: migrate-pipeline
@@ -30,22 +35,33 @@ jobs:
       - name: pull image
         run: docker pull ghcr.io/trywpm/wp-to-wpm:latest
 
+      - name: setup git user
+        run: |
+          git config --global user.name "thelovekeshbot"
+          git config --global user.email "bots@thelovekesh.com"
+
+      - name: run revalidate
+        if: ${{ inputs.revalidate }}
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/code \
+            ghcr.io/trywpm/wp-to-wpm:latest revalidate
+
       - name: run update
         run: |
           docker run --rm \
             -v ${{ github.workspace }}:/code \
             ghcr.io/trywpm/wp-to-wpm:latest update
 
-      - name: setup git user
-        run: |
-          git config --global user.name "thelovekeshbot"
-          git config --global user.email "bots@thelovekesh.com"
-
       - name: commit refreshed state
         run: |
+          MSG="update: refresh whitelists and closures"
+          if [ "${{ inputs.revalidate }}" = "true" ]; then
+            MSG="update (revalidated): prune non-permanent closures and refresh"
+          fi
           git pull origin main
           git add themes.json plugins.json conflicts.json closed-themes.json closed-plugins.json
-          git diff --cached --quiet || git commit -m "update: refresh whitelists and closures"
+          git diff --cached --quiet || git commit -m "$MSG"
 
       - name: push
         run: |
