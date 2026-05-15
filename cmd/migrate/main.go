@@ -35,6 +35,7 @@ type Options struct {
 	registry      string
 	migrationType string
 	concurrency   int
+	tagTimeout    time.Duration
 	logger        *zerolog.Logger
 }
 
@@ -109,7 +110,7 @@ func run(ctx context.Context, o Options, packages []string) error {
 		return fmt.Errorf("failed to get closed %s: %w", pkgType, err)
 	}
 
-	wpClient := wporg.New(wporg.WithConcurrency(2))
+	wpClient := wporg.New(wporg.WithConcurrency(o.concurrency))
 
 	for _, pkg := range packages {
 		if ctx.Err() != nil {
@@ -156,7 +157,12 @@ func run(ctx context.Context, o Options, packages []string) error {
 			continue
 		}
 
-		tagsToMigrate := make([]string, 0, len(tags))
+		type pendingTag struct {
+			raw        string
+			normalized string
+		}
+
+		tagsToMigrate := make([]pendingTag, 0, len(tags))
 		for tag := range tags {
 			normalized, err := version.Normalize(tag)
 			if err != nil {
@@ -164,7 +170,7 @@ func run(ctx context.Context, o Options, packages []string) error {
 			}
 
 			if _, exists := publishedVersions[normalized]; !exists {
-				tagsToMigrate = append(tagsToMigrate, tag)
+				tagsToMigrate = append(tagsToMigrate, pendingTag{raw: tag, normalized: normalized})
 			}
 		}
 
@@ -173,27 +179,72 @@ func run(ctx context.Context, o Options, packages []string) error {
 			continue
 		}
 
+		latestRaw := string(info.Version)
+
 		var eg errgroup.Group
 		eg.SetLimit(o.concurrency)
 
-		for _, tag := range tagsToMigrate {
+		for _, pt := range tagsToMigrate {
 			if ctx.Err() != nil {
 				break
 			}
 
-			tag := tag
+			pt := pt
 
 			eg.Go(func() error {
 				if ctx.Err() != nil {
-					return ctx.Err()
+					return nil
 				}
 
-				pkgLogger := pkgLogger.With().Str("tag", tag).Logger()
+				tagCtx, cancel := context.WithTimeout(ctx, o.tagTimeout)
+				defer cancel()
 
-				pkgLogger.Info().Msgf("Migrating tag %s", tag)
+				tagLogger := pkgLogger.With().
+					Str("tag", pt.raw).
+					Str("version", pt.normalized).
+					Logger()
 
-				// @todo: add wpm publish
+				tagLogger.Info().Msg("Migrating tag")
 
+				exportPath, cleanup, err := svn.Export(tagCtx, pkgType, pkg, pt.raw)
+				if err != nil {
+					if ctx.Err() == nil {
+						tagLogger.Error().Err(err).Msg("svn export failed")
+					}
+					return nil
+				}
+				defer cleanup()
+
+				if err := wpmExec(tagCtx, exportPath,
+					"init", "--existing",
+					"--name", pkg,
+					"--version", pt.normalized,
+					"--type", string(pkgType),
+				); err != nil {
+					if ctx.Err() == nil {
+						tagLogger.Error().Err(err).Msg("wpm init failed")
+					}
+					return nil
+				}
+
+				distTag := "untagged"
+				if latestRaw != "" && latestRaw == pt.raw {
+					distTag = "latest"
+				}
+
+				if err := wpmExec(tagCtx, exportPath,
+					"--registry", o.registry,
+					"publish",
+					"--access", "public",
+					"--tag", distTag,
+				); err != nil {
+					if ctx.Err() == nil {
+						tagLogger.Error().Err(err).Msg("wpm publish failed")
+					}
+					return nil
+				}
+
+				tagLogger.Info().Str("dist_tag", distTag).Msg("Tag migrated")
 				return nil
 			})
 		}
@@ -278,6 +329,7 @@ func main() {
 	}
 
 	cmd.Flags().IntVarP(&opts.concurrency, "concurrency", "c", 2, "Number of concurrent migrations")
+	cmd.Flags().DurationVar(&opts.tagTimeout, "tag-timeout", 8*time.Minute, "Timeout for migrating a single tag")
 
 	cmd.Flags().StringVarP(&opts.registry, "registry", "r", "registry.wpm.so", "wpm registry url")
 	cmd.Flags().StringVarP(&opts.migrationType, "type", "t", "", "Type of migration (plugin or theme)")
