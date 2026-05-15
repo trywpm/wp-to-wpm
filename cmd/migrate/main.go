@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"wpm-migration/pkg/store"
@@ -98,8 +99,6 @@ func run(ctx context.Context, o Options, packages []string) error {
 		return fmt.Errorf("invalid migration type: %s", o.migrationType)
 	}
 
-	o.logger.Info().Str("type", o.migrationType).Int("count", len(packages)).Msg("Starting migration")
-
 	whitelisted, err := store.GetPackages(pkgType)
 	if err != nil {
 		return fmt.Errorf("failed to get whitelisted %s: %w", pkgType, err)
@@ -112,6 +111,40 @@ func run(ctx context.Context, o Options, packages []string) error {
 
 	wpClient := wporg.New(wporg.WithConcurrency(o.concurrency))
 
+	start := time.Now()
+
+	var (
+		pkgsMigrated  int
+		pkgsUpToDate  int
+		skipClosed    int
+		skipWhitelist int
+		skipNoInfo    int
+		pkgsErrored   int
+		tagsPublished int
+		tagsFailed    int
+	)
+
+	defer func() {
+		ev := o.logger.Info()
+		msg := "Migration finished"
+		if ctx.Err() != nil {
+			ev = o.logger.Warn()
+			msg = "Migration interrupted"
+		}
+		ev.
+			Dur("duration", time.Since(start)).
+			Int("packages", len(packages)).
+			Int("migrated", pkgsMigrated).
+			Int("up_to_date", pkgsUpToDate).
+			Int("skipped_closed", skipClosed).
+			Int("skipped_not_whitelisted", skipWhitelist).
+			Int("skipped_no_info", skipNoInfo).
+			Int("errored", pkgsErrored).
+			Int("tags_published", tagsPublished).
+			Int("tags_failed", tagsFailed).
+			Msg(msg)
+	}()
+
 	for _, pkg := range packages {
 		if ctx.Err() != nil {
 			return nil
@@ -119,16 +152,16 @@ func run(ctx context.Context, o Options, packages []string) error {
 
 		pkgLogger := o.logger.With().Str("package", pkg).Logger()
 
-		pkgLogger.Info().Msgf("Migrating %s", pkgType)
-
 		if _, ok := closedPackages[pkg]; ok {
-			pkgLogger.Warn().Msgf("Skipping closed %s", pkgType)
-			continue // Skip closed packages
+			pkgLogger.Info().Str("reason", "closed").Msg("Skipping package")
+			skipClosed++
+			continue
 		}
 
 		if !slices.Contains(whitelisted, pkg) {
-			pkgLogger.Warn().Msgf("Skipping non-whitelisted %s", pkgType)
-			continue // Skip packages not in the whitelist
+			pkgLogger.Info().Str("reason", "not-whitelisted").Msg("Skipping package")
+			skipWhitelist++
+			continue
 		}
 
 		info, err := wpClient.FetchPackageInfo(ctx, pkgType, pkg)
@@ -136,24 +169,37 @@ func run(ctx context.Context, o Options, packages []string) error {
 			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 				return nil
 			}
-			pkgLogger.Error().Err(err).Msgf("Failed to fetch info for %s", pkgType)
+			pkgLogger.Error().Err(err).Str("step", "fetch-info").Msg("Package error")
+			pkgsErrored++
 			continue
 		}
 
 		if info.Error != "" && info.Version == "" {
-			pkgLogger.Error().Str("error", info.Error).Msgf("Skipping closed %s with no version info", pkgType)
+			pkgLogger.Info().
+				Str("reason", "no-version-info").
+				Str("api_error", info.Error).
+				Msg("Skipping package")
+			skipNoInfo++
 			continue
 		}
 
 		publishedVersions, err := getPublishedVersions(ctx, o.registry, pkg)
 		if err != nil {
-			pkgLogger.Error().Err(err).Msg("Failed to fetch published versions")
+			if ctx.Err() != nil {
+				return nil
+			}
+			pkgLogger.Error().Err(err).Str("step", "fetch-published-versions").Msg("Package error")
+			pkgsErrored++
 			continue
 		}
 
 		tags, err := svn.ListTags(ctx, pkgType, pkg)
 		if err != nil {
-			pkgLogger.Error().Err(err).Msg("Failed to list SVN tags")
+			if ctx.Err() != nil {
+				return nil
+			}
+			pkgLogger.Error().Err(err).Str("step", "list-svn-tags").Msg("Package error")
+			pkgsErrored++
 			continue
 		}
 
@@ -175,11 +221,27 @@ func run(ctx context.Context, o Options, packages []string) error {
 		}
 
 		if len(tagsToMigrate) == 0 {
-			pkgLogger.Info().Msg("No new versions to migrate")
+			pkgLogger.Info().
+				Int("svn_tags", len(tags)).
+				Int("published", len(publishedVersions)).
+				Msg("Package up-to-date")
+			pkgsUpToDate++
 			continue
 		}
 
+		pkgStart := time.Now()
+		pkgLogger.Info().
+			Int("svn_tags", len(tags)).
+			Int("published", len(publishedVersions)).
+			Int("to_migrate", len(tagsToMigrate)).
+			Msg("Migrating package")
+
 		latestRaw := string(info.Version)
+
+		var (
+			pkgTagsOK   atomic.Int64
+			pkgTagsFail atomic.Int64
+		)
 
 		var eg errgroup.Group
 		eg.SetLimit(o.concurrency)
@@ -204,12 +266,14 @@ func run(ctx context.Context, o Options, packages []string) error {
 					Str("version", pt.normalized).
 					Logger()
 
+				tagStart := time.Now()
 				tagLogger.Info().Msg("Migrating tag")
 
 				exportPath, cleanup, err := svn.Export(tagCtx, pkgType, pkg, pt.raw)
 				if err != nil {
 					if ctx.Err() == nil {
-						tagLogger.Error().Err(err).Msg("svn export failed")
+						tagLogger.Error().Err(err).Str("step", "svn-export").Msg("Tag failed")
+						pkgTagsFail.Add(1)
 					}
 					return nil
 				}
@@ -222,7 +286,8 @@ func run(ctx context.Context, o Options, packages []string) error {
 					"--type", string(pkgType),
 				); err != nil {
 					if ctx.Err() == nil {
-						tagLogger.Error().Err(err).Msg("wpm init failed")
+						tagLogger.Error().Err(err).Str("step", "wpm-init").Msg("Tag failed")
+						pkgTagsFail.Add(1)
 					}
 					return nil
 				}
@@ -239,25 +304,40 @@ func run(ctx context.Context, o Options, packages []string) error {
 					"--tag", distTag,
 				); err != nil {
 					if ctx.Err() == nil {
-						tagLogger.Error().Err(err).Msg("wpm publish failed")
+						tagLogger.Error().Err(err).Str("step", "wpm-publish").Msg("Tag failed")
+						pkgTagsFail.Add(1)
 					}
 					return nil
 				}
 
-				tagLogger.Info().Str("dist_tag", distTag).Msg("Tag migrated")
+				tagLogger.Info().
+					Str("dist_tag", distTag).
+					Dur("duration", time.Since(tagStart)).
+					Msg("Tag migrated")
+				pkgTagsOK.Add(1)
 				return nil
 			})
 		}
 
-		if err := eg.Wait(); err != nil {
-			if ctx.Err() != nil {
-				pkgLogger.Warn().Msg("Migration interrupted")
-				return nil
-			}
+		_ = eg.Wait()
 
-			pkgLogger.Error().Err(err).Msg("Failed to migrate all tags")
-			continue
+		ok := pkgTagsOK.Load()
+		fail := pkgTagsFail.Load()
+		tagsPublished += int(ok)
+		tagsFailed += int(fail)
+		if ok > 0 || fail > 0 {
+			pkgsMigrated++
 		}
+
+		if ctx.Err() != nil {
+			return nil
+		}
+
+		pkgLogger.Info().
+			Int64("migrated", ok).
+			Int64("failed", fail).
+			Dur("duration", time.Since(pkgStart)).
+			Msg("Package finished")
 	}
 
 	return nil
@@ -309,12 +389,21 @@ func main() {
 				return nil
 			}
 
+			opts.logger.Info().
+				Str("type", opts.migrationType).
+				Int("last_revision", rev).
+				Int("head_revision", headRev).
+				Int("packages", len(args)).
+				Int("concurrency", opts.concurrency).
+				Dur("tag_timeout", opts.tagTimeout).
+				Msg("Starting migration")
+
 			if err := run(cmd.Context(), opts, args); err != nil {
 				return fmt.Errorf("migration failed: %w", err)
 			}
 
+			// don't advance the SVN revision pointer if the run was interrupted
 			if cmd.Context().Err() != nil {
-				opts.logger.Warn().Msg("Migration interrupted, exiting...")
 				return nil
 			}
 
