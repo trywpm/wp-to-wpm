@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 	"wpm-migration/pkg/store"
 	"wpm-migration/pkg/svn"
 
@@ -15,7 +19,7 @@ type Options struct {
 	concurrency   int
 }
 
-func run(opts Options, packages []string) error {
+func run(ctx context.Context, opts Options, packages []string) error {
 	for _, pkg := range packages {
 		println("Migrating package:", pkg)
 	}
@@ -62,7 +66,7 @@ func main() {
 				}
 			}
 
-			if err := run(opts, args); err != nil {
+			if err := run(cmd.Context(), opts, args); err != nil {
 				return fmt.Errorf("migration failed: %w", err)
 			}
 
@@ -85,7 +89,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if err := cmd.Execute(); err != nil {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
+	defer cancel()
+
+	if err := cmd.ExecuteContext(ctx); err != nil {
 		log.Fatal(err)
 	}
 }
