@@ -58,6 +58,15 @@ func main() {
 		log.Fatalf("failed to fetch data: %v", err)
 	}
 
+	// wp.org hosts many thousands of themes and plugins. A listing that
+	// returns under a thousand almost certainly means the upstream HTML
+	// changed and our tokenizer is silently failing to extract entries —
+	// refuse to overwrite the JSON files rather than mass-evict every
+	// existing package as "not-whitelisted" on the next migrate run.
+	if len(themes) < 1000 || len(plugins) < 1000 {
+		log.Fatalf("svn listing returned suspiciously few entries (themes=%d, plugins=%d); refusing to overwrite", len(themes), len(plugins))
+	}
+
 	var conflicts []string
 	for theme := range themes {
 		if _, exists := plugins[theme]; exists {
