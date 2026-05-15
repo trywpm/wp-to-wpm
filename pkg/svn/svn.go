@@ -170,7 +170,7 @@ type SvnPath struct {
 	Path string `xml:",chardata"`
 }
 
-func updatedPackages(ctx context.Context, pkgType store.PackageType, startRev int) ([]string, int, error) {
+func GetUpdatedPackages(ctx context.Context, pkgType store.PackageType, startRev int) ([]string, int, error) {
 	if startRev <= 0 {
 		return nil, 0, fmt.Errorf("invalid start revision: %d", startRev)
 	}
@@ -269,9 +269,9 @@ func updatedPackages(ctx context.Context, pkgType store.PackageType, startRev in
 }
 
 func UpdatedPlugins(ctx context.Context, startRev int) ([]string, int, error) {
-	return updatedPackages(ctx, store.Plugin, startRev)
+	return GetUpdatedPackages(ctx, store.Plugin, startRev)
 }
 
 func UpdatedThemes(ctx context.Context, startRev int) ([]string, int, error) {
-	return updatedPackages(ctx, store.Theme, startRev)
+	return GetUpdatedPackages(ctx, store.Theme, startRev)
 }
