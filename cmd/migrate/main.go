@@ -6,12 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
-	"slices"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -67,12 +67,13 @@ func getPublishedVersions(ctx context.Context, registry, slug string) (map[strin
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch versions from %s: %w", url, err)
 	}
-	defer resp.Body.Close()
-
-	versions := make(map[string]struct{})
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return versions, nil // No versions exist yet, return empty map
+		return map[string]struct{}{}, nil // No versions exist yet, return empty map
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -86,6 +87,7 @@ func getPublishedVersions(ctx context.Context, registry, slug string) (map[strin
 		return nil, fmt.Errorf("failed to decode registry response from %s: %w", url, err)
 	}
 
+	versions := make(map[string]struct{}, len(r.Versions))
 	for _, v := range r.Versions {
 		versions[v] = struct{}{}
 	}
@@ -99,9 +101,13 @@ func run(ctx context.Context, o Options, packages []string) error {
 		return fmt.Errorf("invalid migration type: %s", o.migrationType)
 	}
 
-	whitelisted, err := store.GetPackages(pkgType)
+	whitelistedList, err := store.GetPackages(pkgType)
 	if err != nil {
 		return fmt.Errorf("failed to get whitelisted %s: %w", pkgType, err)
+	}
+	whitelisted := make(map[string]struct{}, len(whitelistedList))
+	for _, w := range whitelistedList {
+		whitelisted[w] = struct{}{}
 	}
 
 	closedPackages, err := store.GetClosedPackages(pkgType)
@@ -158,7 +164,7 @@ func run(ctx context.Context, o Options, packages []string) error {
 			continue
 		}
 
-		if !slices.Contains(whitelisted, pkg) {
+		if _, ok := whitelisted[pkg]; !ok {
 			pkgLogger.Info().Str("reason", "not-whitelisted").Msg("Skipping package")
 			skipWhitelist++
 			continue
