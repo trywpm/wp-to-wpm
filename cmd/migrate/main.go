@@ -44,18 +44,19 @@ func main() {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if !(store.PackageType(opts.migrationType).Valid()) {
+			pkgType := store.PackageType(opts.migrationType)
+			if !pkgType.Valid() {
 				return fmt.Errorf("invalid migration type: %s", opts.migrationType)
 			}
 
-			rev, err := store.GetLastSvnRevision(store.PackageType(opts.migrationType))
+			rev, err := store.GetLastSvnRevision(pkgType)
 			if err != nil {
 				return fmt.Errorf("failed to get last SVN revision: %w", err)
 			}
 
 			var headRev int
 			if len(args) == 0 {
-				args, headRev, err = svn.GetUpdatedPackages(cmd.Context(), store.PackageType(opts.migrationType), rev+1)
+				args, headRev, err = svn.GetUpdatedPackages(cmd.Context(), pkgType, rev+1)
 				if err != nil {
 					return fmt.Errorf("failed to get updated packages: %w", err)
 				}
