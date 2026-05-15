@@ -17,7 +17,6 @@ import (
 	"wpm-migration/pkg/store"
 	"wpm-migration/pkg/unsafeconv"
 	"wpm-migration/pkg/validate"
-	"wpm-migration/pkg/version"
 
 	"golang.org/x/net/html"
 )
@@ -32,6 +31,7 @@ var (
 )
 
 var (
+	ulBytes     = []byte("ul")
 	hrefBytes   = []byte("href")
 	parentBytes = []byte("../")
 )
@@ -51,7 +51,7 @@ func List(ctx context.Context, pkgType store.PackageType) (map[string]struct{}, 
 //
 // Items are returned as a map where the key is the original tag name
 // from SVN and the value is the normalized version string.
-func ListPluginTags(ctx context.Context, pluginSlug string) (map[string]string, error) {
+func ListPluginTags(ctx context.Context, pluginSlug string) (map[string]struct{}, error) {
 	if !validate.PackageName(unsafeconv.StringToBytes(pluginSlug)) {
 		return nil, fmt.Errorf("invalid plugin slug: %s", pluginSlug)
 	}
@@ -59,51 +59,32 @@ func ListPluginTags(ctx context.Context, pluginSlug string) (map[string]string, 
 	// svn plugin repo stores tags under /tags/ subdirectory.
 	svnRepo := fmt.Sprintf("%s/%s/tags/", pluginsSvnRepo, pluginSlug)
 
-	items, err := list(ctx, svnRepo, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list plugin tags: %w", err)
-	}
-
-	validatedItems := make(map[string]string, len(items))
-	for item := range items {
-		v, err := version.Normalize(item)
-		if err != nil {
-			continue
-		}
-
-		validatedItems[item] = v
-	}
-
-	return validatedItems, nil
+	return list(ctx, svnRepo, nil)
 }
 
 // ListThemeTags lists all tags for a given theme slug.
 //
 // Items are returned as a map where the key is the original tag name
 // from SVN and the value is the normalized version string.
-func ListThemeTags(ctx context.Context, themeSlug string) (map[string]string, error) {
+func ListThemeTags(ctx context.Context, themeSlug string) (map[string]struct{}, error) {
 	if !validate.PackageName(unsafeconv.StringToBytes(themeSlug)) {
 		return nil, fmt.Errorf("invalid theme slug: %s", themeSlug)
 	}
 
 	svnRepo := fmt.Sprintf("%s/%s", themesSvnRepo, themeSlug)
 
-	items, err := list(ctx, svnRepo, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list theme tags: %w", err)
+	return list(ctx, svnRepo, nil)
+}
+
+func ListTags(ctx context.Context, pkgType store.PackageType, slug string) (map[string]struct{}, error) {
+	switch pkgType {
+	case store.Theme:
+		return ListThemeTags(ctx, slug)
+	case store.Plugin:
+		return ListPluginTags(ctx, slug)
+	default:
+		return nil, fmt.Errorf("invalid package type: %s", pkgType)
 	}
-
-	validatedItems := make(map[string]string, len(items))
-	for item := range items {
-		v, err := version.Normalize(item)
-		if err != nil {
-			continue
-		}
-
-		validatedItems[item] = v
-	}
-
-	return validatedItems, nil
 }
 
 func list(ctx context.Context, svnRepo string, isValid func([]byte) bool) (map[string]struct{}, error) {
@@ -125,6 +106,8 @@ func list(ctx context.Context, svnRepo string, isValid func([]byte) bool) (map[s
 	list := make(map[string]struct{})
 	z := html.NewTokenizer(resp.Body)
 
+	ulDepth := 0
+
 	for {
 		switch z.Next() {
 		case html.ErrorToken:
@@ -136,6 +119,15 @@ func list(ctx context.Context, svnRepo string, isValid func([]byte) bool) (map[s
 
 		case html.StartTagToken:
 			name, hasAttr := z.TagName()
+			if bytes.Equal(name, ulBytes) {
+				ulDepth++
+			}
+
+			// If we are not inside a <ul> list, ignore all tags
+			if ulDepth == 0 {
+				continue
+			}
+
 			if !hasAttr || len(name) != 1 || name[0] != 'a' {
 				continue
 			}
@@ -157,6 +149,12 @@ func list(ctx context.Context, svnRepo string, isValid func([]byte) bool) (map[s
 				if !more {
 					break
 				}
+			}
+
+		case html.EndTagToken:
+			name, _ := z.TagName()
+			if bytes.Equal(name, ulBytes) && ulDepth > 0 {
+				ulDepth--
 			}
 		}
 	}
