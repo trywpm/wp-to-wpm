@@ -286,8 +286,12 @@ func SetConflicts(conflicts []string) error {
 // GetClosedThemes returns the data from closed-themes.json
 func GetClosedThemes() (map[string]PackageClosure, error) {
 	var closedThemes map[string]PackageClosure
-	if err := getData(ClosedThemes, &closedThemes); err != nil {
-		return nil, fmt.Errorf("get closed themes: %w", err)
+	err := getData(ClosedThemes, &closedThemes)
+	if closedThemes == nil {
+		closedThemes = make(map[string]PackageClosure)
+	}
+	if err != nil {
+		return closedThemes, fmt.Errorf("get closed themes: %w", err)
 	}
 	return closedThemes, nil
 }
@@ -300,8 +304,12 @@ func SetClosedThemes(closedThemes map[string]PackageClosure) error {
 // GetClosedPlugins returns the data from closed-plugins.json
 func GetClosedPlugins() (map[string]PackageClosure, error) {
 	var closedPlugins map[string]PackageClosure
-	if err := getData(ClosedPlugins, &closedPlugins); err != nil {
-		return nil, fmt.Errorf("get closed plugins: %w", err)
+	err := getData(ClosedPlugins, &closedPlugins)
+	if closedPlugins == nil {
+		closedPlugins = make(map[string]PackageClosure)
+	}
+	if err != nil {
+		return closedPlugins, fmt.Errorf("get closed plugins: %w", err)
 	}
 	return closedPlugins, nil
 }
