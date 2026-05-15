@@ -15,38 +15,10 @@ import (
 
 	"wpm-migration/pkg/store"
 	"wpm-migration/pkg/svn"
-	"wpm-migration/pkg/validate"
 	"wpm-migration/pkg/wporg"
 
 	"golang.org/x/sync/errgroup"
 )
-
-const (
-	// output files.
-	themesJson        = "themes.json"
-	pluginsJson       = "plugins.json"
-	resolvedJson      = "resolved.json"
-	conflictsJson     = "conflicts.json"
-	closedThemesJson  = "closed-themes.json"
-	closedPluginsJson = "closed-plugins.json"
-
-	// svn repos.
-	themesSvnRepo  = "https://themes.svn.wordpress.org/"
-	pluginsSvnRepo = "https://plugins.svn.wordpress.org/"
-)
-
-type packageClosure string
-
-const (
-	closureUnknown   packageClosure = "unknown"
-	closureTemporary packageClosure = "temporary"
-	closurePermanent packageClosure = "permanent"
-)
-
-type resolvedConfig struct {
-	Themes  []string `json:"themes"`
-	Plugins []string `json:"plugins"`
-}
 
 func main() {
 	var workers int
@@ -64,12 +36,12 @@ func main() {
 
 	eg.Go(func() error {
 		var err error
-		themes, err = svn.List(svnCtx, themesSvnRepo, validate.PackageName)
+		themes, err = svn.List(svnCtx, store.Theme)
 		return err
 	})
 	eg.Go(func() error {
 		var err error
-		plugins, err = svn.List(svnCtx, pluginsSvnRepo, validate.PackageName)
+		plugins, err = svn.List(svnCtx, store.Plugin)
 		return err
 	})
 
@@ -89,9 +61,9 @@ func main() {
 		delete(plugins, conflict)
 	}
 
-	var resolved resolvedConfig
-	if err := store.GetData(store.Resolved, &resolved); err != nil {
-		log.Fatalf("failed to read resolved config: %v", err)
+	resolved, err := store.GetResolved()
+	if err != nil {
+		log.Printf("warning: failed to read resolved json: %v", err)
 	}
 
 	resolvedThemes := make(map[string]struct{}, len(resolved.Themes))
@@ -116,25 +88,25 @@ func main() {
 	pluginsList := slices.Sorted(maps.Keys(plugins))
 	slices.Sort(conflicts)
 
-	if err := store.SetData(store.Themes, themesList); err != nil {
+	if err := store.SetThemes(themesList); err != nil {
 		log.Fatalf("failed to write themes json: %v", err)
 	}
-	if err := store.SetData(store.Plugins, pluginsList); err != nil {
+	if err := store.SetPlugins(pluginsList); err != nil {
 		log.Fatalf("failed to write plugins json: %v", err)
 	}
-	if err := store.SetData(store.Conflicts, conflicts); err != nil {
+	if err := store.SetConflicts(conflicts); err != nil {
 		log.Fatalf("failed to write conflicts json: %v", err)
 	}
 
 	log.Println("successfully updated themes, plugins and conflicts packages data.")
 
-	closedThemes := make(map[string]packageClosure)
-	closedPlugins := make(map[string]packageClosure)
-
-	if err := store.GetData(store.ClosedThemes, &closedThemes); err != nil {
+	closedThemes, err := store.GetClosedThemes()
+	if err != nil {
 		log.Printf("warning: failed to read closed themes json: %v", err)
 	}
-	if err := store.GetData(store.ClosedPlugins, &closedPlugins); err != nil {
+
+	closedPlugins, err := store.GetClosedPlugins()
+	if err != nil {
 		log.Printf("warning: failed to read closed plugins json: %v", err)
 	}
 
@@ -180,7 +152,7 @@ func main() {
 				if err != nil {
 					if errors.Is(err, wporg.ErrNotFound) {
 						themesMu.Lock()
-						closedThemes[themeSlug] = closureUnknown
+						closedThemes[themeSlug] = store.ClosureUnknown
 						themesMu.Unlock()
 					} else {
 						// Don't fail the entire process, just log temporary failures.
@@ -191,7 +163,7 @@ func main() {
 
 				if info != nil && strings.Contains(info.Error, "Theme not found") {
 					themesMu.Lock()
-					closedThemes[themeSlug] = closureUnknown
+					closedThemes[themeSlug] = store.ClosureUnknown
 					themesMu.Unlock()
 				}
 				return nil
@@ -221,7 +193,7 @@ func main() {
 				if err != nil {
 					if errors.Is(err, wporg.ErrNotFound) {
 						pluginsMu.Lock()
-						closedPlugins[pluginSlug] = closureUnknown
+						closedPlugins[pluginSlug] = store.ClosureUnknown
 						pluginsMu.Unlock()
 					} else {
 						// Don't fail the entire process, just log temporary failures.
@@ -231,13 +203,13 @@ func main() {
 				}
 
 				if info != nil && info.Error != "" {
-					closureType := closureUnknown
+					closureType := store.ClosureUnknown
 
 					if info.Error == "closed" {
-						closureType = closureTemporary
+						closureType = store.ClosureTemporary
 
 						if strings.Contains(info.Description, "This closure is permanent.") {
-							closureType = closurePermanent
+							closureType = store.ClosurePermanent
 						}
 					}
 
@@ -259,10 +231,10 @@ func main() {
 		fmt.Println()
 	}
 
-	if err := store.SetData(store.ClosedThemes, closedThemes); err != nil {
+	if err := store.SetClosedThemes(closedThemes); err != nil {
 		log.Fatalf("failed to write closed themes json: %v", err)
 	}
-	if err := store.SetData(store.ClosedPlugins, closedPlugins); err != nil {
+	if err := store.SetClosedPlugins(closedPlugins); err != nil {
 		log.Fatalf("failed to write closed plugins json: %v", err)
 	}
 
