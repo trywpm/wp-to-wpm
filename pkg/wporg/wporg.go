@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -145,11 +144,13 @@ func (c *Client) doRequest(ctx context.Context, reqURL string) (*Info, error) {
 
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
 		if attempt > 0 {
-			delay := c.retryDelay * time.Duration(math.Pow(2, float64(attempt-1)))
+			delay := c.retryDelay << (attempt - 1)
+			t := time.NewTimer(delay)
 			select {
 			case <-ctx.Done():
+				t.Stop()
 				return nil, ctx.Err()
-			case <-time.After(delay):
+			case <-t.C:
 			}
 		}
 
