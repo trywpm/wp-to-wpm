@@ -236,6 +236,9 @@ func GetUpdatedPackages(ctx context.Context, pkgType store.PackageType, startRev
 			if errors.Is(err, io.EOF) {
 				break
 			}
+			if ctx.Err() != nil {
+				return nil, 0, ctx.Err()
+			}
 			return nil, 0, fmt.Errorf("error parsing XML stream: %w", err)
 		}
 
@@ -245,6 +248,9 @@ func GetUpdatedPackages(ctx context.Context, pkgType store.PackageType, startRev
 			if se.Name.Local == "logentry" {
 				var entry SvnLogEntry
 				if err := decoder.DecodeElement(&entry, &se); err != nil {
+					if ctx.Err() != nil {
+						return nil, 0, ctx.Err()
+					}
 					return nil, 0, fmt.Errorf("failed to decode svn log entry: %w", err)
 				}
 
@@ -268,6 +274,10 @@ func GetUpdatedPackages(ctx context.Context, pkgType store.PackageType, startRev
 	}
 
 	if err := drainAndWait(); err != nil {
+		if ctx.Err() != nil {
+			return nil, 0, ctx.Err()
+		}
+
 		errMsg := stderrBuf.String()
 
 		if strings.Contains(errMsg, "E160006") {
