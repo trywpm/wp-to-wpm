@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -176,17 +177,19 @@ func GetUpdatedPackages(ctx context.Context, pkgType store.PackageType, startRev
 	}
 
 	var svnRepoURL string
-	if pkgType == store.Theme {
-		svnRepoURL = themesSvnRepo
-	} else {
+	switch pkgType {
+	case store.Plugin:
 		svnRepoURL = pluginsSvnRepo
+	case store.Theme:
+		svnRepoURL = themesSvnRepo
+	default:
+		return nil, 0, fmt.Errorf("invalid package type: %s", pkgType)
 	}
 
 	revisionRange := fmt.Sprintf("%d:HEAD", startRev)
 
 	cmd := exec.CommandContext(ctx, "svn", "log", "--xml", "-q", "-v", "--non-interactive", "-r", revisionRange, svnRepoURL)
-
-	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
+	cmd.Env = append(os.Environ(), "LC_ALL=", "LC_MESSAGES=C", "LANG=C")
 
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
@@ -274,4 +277,34 @@ func UpdatedPlugins(ctx context.Context, startRev int) ([]string, int, error) {
 
 func UpdatedThemes(ctx context.Context, startRev int) ([]string, int, error) {
 	return GetUpdatedPackages(ctx, store.Theme, startRev)
+}
+
+func export(ctx context.Context, pkgType store.PackageType, name, tag string) (path string, cleanup func(), err error) {
+	tempDir, err := os.MkdirTemp("", "svn-checkout-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to create temporary directory: %w", err)
+	}
+
+	var svnTagUrl string
+	switch pkgType {
+	case store.Plugin:
+		svnTagUrl = fmt.Sprintf("%s/%s/tags/%s", pluginsSvnRepo, name, tag)
+	case store.Theme:
+		svnTagUrl = fmt.Sprintf("%s/%s/%s", themesSvnRepo, name, tag)
+	default:
+		return "", nil, fmt.Errorf("invalid package type: %s", pkgType)
+	}
+
+	checkoutPath := filepath.Join(tempDir, name, tag)
+
+	cmd := exec.CommandContext(ctx, "svn", "export", "-q", "--non-interactive", svnTagUrl, checkoutPath)
+	cmd.Env = append(os.Environ(), "LC_ALL=", "LC_MESSAGES=C") // Ensure error messages are in English for consistent error handling
+	if o, err := cmd.CombinedOutput(); err != nil {
+		_ = os.RemoveAll(tempDir)
+		return "", nil, fmt.Errorf("svn export failed: %w\noutput: %s", err, string(o))
+	}
+
+	return checkoutPath, func() {
+		_ = os.RemoveAll(tempDir)
+	}, nil
 }
