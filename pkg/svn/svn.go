@@ -189,7 +189,7 @@ func GetUpdatedPackages(ctx context.Context, pkgType store.PackageType, startRev
 	revisionRange := fmt.Sprintf("%d:HEAD", startRev)
 
 	cmd := exec.CommandContext(ctx, "svn", "log", "--xml", "-q", "-v", "--non-interactive", "-r", revisionRange, svnRepoURL)
-	cmd.Env = append(os.Environ(), "LC_ALL=", "LC_MESSAGES=C", "LANG=C")
+	cmd.Env = append(os.Environ(), "LC_ALL=", "LC_MESSAGES=C")
 
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
@@ -209,11 +209,11 @@ func GetUpdatedPackages(ctx context.Context, pkgType store.PackageType, startRev
 	decoder := xml.NewDecoder(stdout)
 	for {
 		t, err := decoder.Token()
-		if err == io.EOF {
-			break
-		}
 		if err != nil {
-			break
+			if err == io.EOF {
+				break
+			}
+			return nil, 0, fmt.Errorf("error parsing XML stream: %w", err)
 		}
 
 		// Look for <logentry> tags
@@ -243,6 +243,7 @@ func GetUpdatedPackages(ctx context.Context, pkgType store.PackageType, startRev
 			}
 		}
 	}
+	_, _ = io.Copy(io.Discard, stdout)
 
 	if err := cmd.Wait(); err != nil {
 		errMsg := stderrBuf.String()
