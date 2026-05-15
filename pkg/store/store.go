@@ -310,3 +310,27 @@ func GetClosedPlugins() (map[string]PackageClosure, error) {
 func SetClosedPlugins(closedPlugins map[string]PackageClosure) error {
 	return setData(ClosedPlugins, closedPlugins)
 }
+
+// GetPackages returns the list of packages of the given type (themes or plugins).
+func GetPackages(pkgType PackageType) ([]string, error) {
+	switch pkgType {
+	case Theme:
+		return GetThemes()
+	case Plugin:
+		return GetPlugins()
+	default:
+		return nil, fmt.Errorf("invalid package type: %s", pkgType)
+	}
+}
+
+// GetClosedPackages returns the map of closed packages of the given type (themes or plugins).
+func GetClosedPackages(pkgType PackageType) (map[string]PackageClosure, error) {
+	switch pkgType {
+	case Theme:
+		return GetClosedThemes()
+	case Plugin:
+		return GetClosedPlugins()
+	default:
+		return nil, fmt.Errorf("invalid package type: %s", pkgType)
+	}
+}
