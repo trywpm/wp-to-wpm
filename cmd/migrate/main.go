@@ -209,6 +209,13 @@ func run(ctx context.Context, o Options, packages []string) error {
 			continue
 		}
 
+		var latestNormalized string
+		if latestRaw := string(info.Version); latestRaw != "" {
+			if n, err := version.Normalize(latestRaw); err == nil {
+				latestNormalized = n
+			}
+		}
+
 		type pendingTag struct {
 			raw        string
 			normalized string
@@ -221,9 +228,11 @@ func run(ctx context.Context, o Options, packages []string) error {
 				continue // Skip tags that can't be normalized as versions
 			}
 
-			if _, exists := publishedVersions[normalized]; !exists {
-				tagsToMigrate = append(tagsToMigrate, pendingTag{raw: tag, normalized: normalized})
+			if _, published := publishedVersions[normalized]; published {
+				continue
 			}
+
+			tagsToMigrate = append(tagsToMigrate, pendingTag{raw: tag, normalized: normalized})
 		}
 
 		if len(tagsToMigrate) == 0 {
@@ -241,8 +250,6 @@ func run(ctx context.Context, o Options, packages []string) error {
 			Int("published", len(publishedVersions)).
 			Int("to_migrate", len(tagsToMigrate)).
 			Msg("Migrating package")
-
-		latestRaw := string(info.Version)
 
 		var (
 			pkgTagsOK   atomic.Int64
@@ -299,7 +306,7 @@ func run(ctx context.Context, o Options, packages []string) error {
 				}
 
 				distTag := "untagged"
-				if latestRaw != "" && latestRaw == pt.raw {
+				if latestNormalized != "" && latestNormalized == pt.normalized {
 					distTag = "latest"
 				}
 
@@ -382,6 +389,9 @@ func main() {
 			if len(args) == 0 {
 				args, headRev, err = svn.GetUpdatedPackages(cmd.Context(), pkgType, rev+1)
 				if err != nil {
+					if errors.Is(err, context.Canceled) || cmd.Context().Err() != nil {
+						return nil
+					}
 					return fmt.Errorf("failed to get updated packages: %w", err)
 				}
 			}
@@ -392,6 +402,13 @@ func main() {
 					Int("last_revision", rev).
 					Int("head_revision", headRev).
 					Msg("No new packages found to migrate")
+
+				// still advance the SVN revision pointer to avoid repeatedly fetching the same updates on next run.
+				if headRev > rev {
+					if err := store.SetLastSvnRevision(pkgType, headRev); err != nil {
+						return fmt.Errorf("failed to update last SVN revision: %w", err)
+					}
+				}
 				return nil
 			}
 
