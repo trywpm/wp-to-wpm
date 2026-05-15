@@ -8,6 +8,7 @@ import (
 	"log"
 	"maps"
 	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"sync"
@@ -21,6 +22,11 @@ import (
 )
 
 func main() {
+	_, err := exec.LookPath("svn")
+	if err != nil {
+		log.Fatalf("svn command not found: %v", err)
+	}
+
 	var workers int
 	flag.IntVar(&workers, "w", 50, "Number of concurrent workers")
 	flag.IntVar(&workers, "worker", 50, "Number of concurrent workers (alias)")

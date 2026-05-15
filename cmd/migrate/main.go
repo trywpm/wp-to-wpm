@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 	"wpm-migration/pkg/store"
@@ -48,6 +49,16 @@ func main() {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			_, err := exec.LookPath("svn")
+			if err != nil {
+				return fmt.Errorf("svn command not found: %w", err)
+			}
+
+			_, err = exec.LookPath("wpm")
+			if err != nil {
+				return fmt.Errorf("wpm command not found: %w", err)
+			}
+
 			pkgType := store.PackageType(opts.migrationType)
 			if !pkgType.Valid() {
 				return fmt.Errorf("invalid migration type: %s", opts.migrationType)
