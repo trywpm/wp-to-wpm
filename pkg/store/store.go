@@ -75,6 +75,32 @@ func (pt PackageType) revFile() (StoreFile, error) {
 	}
 }
 
+type PackageClosure string
+
+const (
+	ClosureUnknown   PackageClosure = "unknown"
+	ClosureTemporary PackageClosure = "temporary"
+	ClosurePermanent PackageClosure = "permanent"
+)
+
+func (pc PackageClosure) String() string {
+	return string(pc)
+}
+
+func (pc PackageClosure) Valid() bool {
+	switch pc {
+	case ClosureUnknown, ClosureTemporary, ClosurePermanent:
+		return true
+	default:
+		return false
+	}
+}
+
+type ResolvedConfig struct {
+	Themes  []string `json:"themes"`
+	Plugins []string `json:"plugins"`
+}
+
 // atomicWrite writes to path durably: tmp file in the same directory,
 // fsync, then rename. From any outside observer the file contains either
 // the old contents or the new contents — never anything in between.
@@ -163,9 +189,9 @@ func SetLastSvnRevision(pkgType PackageType, rev int) error {
 	})
 }
 
-// GetData reads the specified data file and unmarshals it into dest.
+// getData reads the specified data file and unmarshals it into dest.
 // If the file does not exist, dest is left unchanged and no error is returned.
-func GetData(file StoreFile, dest any) error {
+func getData(file StoreFile, dest any) error {
 	if !file.IsDataFile() {
 		return fmt.Errorf("file %s is not a data file", file)
 	}
@@ -188,7 +214,8 @@ func GetData(file StoreFile, dest any) error {
 	return nil
 }
 
-func SetData(file StoreFile, data any) error {
+// setData marshals data and writes it to the specified file atomically.
+func setData(file StoreFile, data any) error {
 	if !file.IsDataFile() {
 		return fmt.Errorf("file %s is not a data file", file)
 	}
@@ -198,4 +225,88 @@ func SetData(file StoreFile, data any) error {
 		enc.SetIndent("", "  ")
 		return enc.Encode(data)
 	})
+}
+
+// GetPlugins returns the data from plugins.json
+func GetPlugins() ([]string, error) {
+	var plugins []string
+	if err := getData(Plugins, &plugins); err != nil {
+		return nil, fmt.Errorf("get plugins: %w", err)
+	}
+	return plugins, nil
+}
+
+// SetPlugins writes the given plugins list to plugins.json
+func SetPlugins(plugins []string) error {
+	return setData(Plugins, plugins)
+}
+
+// GetThemes returns the data from themes.json
+func GetThemes() ([]string, error) {
+	var themes []string
+	if err := getData(Themes, &themes); err != nil {
+		return nil, fmt.Errorf("get themes: %w", err)
+	}
+	return themes, nil
+}
+
+// SetThemes writes the given themes list to themes.json
+func SetThemes(themes []string) error {
+	return setData(Themes, themes)
+}
+
+// GetResolved returns the data from resolved.json
+func GetResolved() (ResolvedConfig, error) {
+	var resolved ResolvedConfig
+	if err := getData(Resolved, &resolved); err != nil {
+		return ResolvedConfig{}, fmt.Errorf("get resolved config: %w", err)
+	}
+	return resolved, nil
+}
+
+// SetResolved writes the given resolved config to resolved.json
+func SetResolved(resolved ResolvedConfig) error {
+	return setData(Resolved, resolved)
+}
+
+// GetConflicts returns the data from conflicts.json
+func GetConflicts() ([]string, error) {
+	var conflicts []string
+	if err := getData(Conflicts, &conflicts); err != nil {
+		return nil, fmt.Errorf("get conflicts: %w", err)
+	}
+	return conflicts, nil
+}
+
+// SetConflicts writes the given conflicts list to conflicts.json
+func SetConflicts(conflicts []string) error {
+	return setData(Conflicts, conflicts)
+}
+
+// GetClosedThemes returns the data from closed-themes.json
+func GetClosedThemes() (map[string]PackageClosure, error) {
+	var closedThemes map[string]PackageClosure
+	if err := getData(ClosedThemes, &closedThemes); err != nil {
+		return nil, fmt.Errorf("get closed themes: %w", err)
+	}
+	return closedThemes, nil
+}
+
+// SetClosedThemes writes the given closed themes map to closed-themes.json
+func SetClosedThemes(closedThemes map[string]PackageClosure) error {
+	return setData(ClosedThemes, closedThemes)
+}
+
+// GetClosedPlugins returns the data from closed-plugins.json
+func GetClosedPlugins() (map[string]PackageClosure, error) {
+	var closedPlugins map[string]PackageClosure
+	if err := getData(ClosedPlugins, &closedPlugins); err != nil {
+		return nil, fmt.Errorf("get closed plugins: %w", err)
+	}
+	return closedPlugins, nil
+}
+
+// SetClosedPlugins writes the given closed plugins map to closed-plugins.json
+func SetClosedPlugins(closedPlugins map[string]PackageClosure) error {
+	return setData(ClosedPlugins, closedPlugins)
 }
