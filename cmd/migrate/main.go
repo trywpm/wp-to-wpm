@@ -8,9 +8,13 @@ import (
 	"os/exec"
 	"os/signal"
 	"syscall"
+	"time"
 	"wpm-migration/pkg/store"
 	"wpm-migration/pkg/svn"
 
+	"github.com/newrelic/go-agent/v3/integrations/logcontext-v2/zerologWriter"
+	"github.com/newrelic/go-agent/v3/newrelic"
+	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
 )
 
@@ -18,11 +22,12 @@ type Options struct {
 	registry      string
 	migrationType string
 	concurrency   int
+	logger        *zerolog.Logger
 }
 
-func run(ctx context.Context, opts Options, packages []string) error {
+func run(ctx context.Context, o Options, packages []string) error {
 	for _, pkg := range packages {
-		println("Migrating package:", pkg)
+		o.logger.Info().Str("package", pkg).Msg("Migrating package")
 	}
 
 	// @todo: Implement the actual migration logic here, including:
@@ -103,7 +108,33 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
+	app, err := newrelic.NewApplication(
+		newrelic.ConfigAppName("wp-to-wpm migrate"),
+		newrelic.ConfigFromEnvironment(),
+		newrelic.ConfigAppLogForwardingEnabled(true),
+		newrelic.ConfigEnabled(os.Getenv("CI") == "true"),
+	)
+	if err != nil {
+		panic(fmt.Sprintf("failed to create New Relic application: %v", err))
+	}
+
+	app.WaitForConnection(5 * time.Second)
+	defer app.Shutdown(10 * time.Second)
+
+	zerolog.TimeFieldFormat = time.RFC3339
+
+	consoleWriter := zerolog.ConsoleWriter{
+		Out:        os.Stderr,
+		TimeFormat: time.DateTime,
+	}
+	nrWriter := zerologWriter.New(consoleWriter, app)
+
+	logger := zerolog.New(nrWriter).With().Timestamp().Logger()
+	opts.logger = &logger
+
 	if err := cmd.ExecuteContext(ctx); err != nil {
-		log.Fatal(err)
+		logger.Error().Err(err).Msg("Migration failed")
+		app.Shutdown(10 * time.Second)
+		os.Exit(1)
 	}
 }
