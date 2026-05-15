@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -14,6 +15,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 	"wpm-migration/pkg/store"
 	"wpm-migration/pkg/unsafeconv"
 	"wpm-migration/pkg/validate"
@@ -26,9 +29,20 @@ const (
 	pluginsSvnRepo = "https://plugins.svn.wordpress.org"
 )
 
-var (
-	httpClient = &http.Client{}
-)
+var httpClient = &http.Client{
+	Timeout: 60 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:          16,
+		MaxIdleConnsPerHost:   8,
+		MaxConnsPerHost:       16,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+	},
+}
 
 var (
 	ulBytes     = []byte("ul")
@@ -57,7 +71,7 @@ func ListPluginTags(ctx context.Context, pluginSlug string) (map[string]struct{}
 	}
 
 	// svn plugin repo stores tags under /tags/ subdirectory.
-	svnRepo := fmt.Sprintf("%s/%s/tags/", pluginsSvnRepo, pluginSlug)
+	svnRepo := pluginsSvnRepo + "/" + pluginSlug + "/tags/"
 
 	return list(ctx, svnRepo, nil)
 }
@@ -71,7 +85,7 @@ func ListThemeTags(ctx context.Context, themeSlug string) (map[string]struct{}, 
 		return nil, fmt.Errorf("invalid theme slug: %s", themeSlug)
 	}
 
-	svnRepo := fmt.Sprintf("%s/%s", themesSvnRepo, themeSlug)
+	svnRepo := themesSvnRepo + "/" + themeSlug
 
 	return list(ctx, svnRepo, nil)
 }
@@ -97,7 +111,10 @@ func list(ctx context.Context, svnRepo string, isValid func([]byte) bool) (map[s
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch data from %s: %w", svnRepo, err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 
 	list := make(map[string]struct{})
 
@@ -142,12 +159,9 @@ func list(ctx context.Context, svnRepo string, isValid func([]byte) bool) (map[s
 				if bytes.Equal(k, hrefBytes) {
 					if len(v) > 1 && v[len(v)-1] == '/' && !bytes.Equal(v, parentBytes) {
 						slug := v[:len(v)-1]
-
-						if isValid != nil && !isValid(slug) {
-							continue
+						if isValid == nil || isValid(slug) {
+							list[string(slug)] = struct{}{}
 						}
-
-						list[string(slug)] = struct{}{}
 					}
 					break
 				}
@@ -206,6 +220,12 @@ func GetUpdatedPackages(ctx context.Context, pkgType store.PackageType, startRev
 		return nil, 0, fmt.Errorf("failed to start svn command: %w", err)
 	}
 
+	drainAndWait := sync.OnceValue(func() error {
+		_, _ = io.Copy(io.Discard, stdout)
+		return cmd.Wait()
+	})
+	defer drainAndWait()
+
 	packageSet := make(map[string]struct{})
 	newHeadRev := 0
 
@@ -213,7 +233,7 @@ func GetUpdatedPackages(ctx context.Context, pkgType store.PackageType, startRev
 	for {
 		t, err := decoder.Token()
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				break
 			}
 			return nil, 0, fmt.Errorf("error parsing XML stream: %w", err)
@@ -246,9 +266,8 @@ func GetUpdatedPackages(ctx context.Context, pkgType store.PackageType, startRev
 			}
 		}
 	}
-	_, _ = io.Copy(io.Discard, stdout)
 
-	if err := cmd.Wait(); err != nil {
+	if err := drainAndWait(); err != nil {
 		errMsg := stderrBuf.String()
 
 		if strings.Contains(errMsg, "E160006") {
@@ -287,19 +306,19 @@ func UpdatedThemes(ctx context.Context, startRev int) ([]string, int, error) {
 // The returned cleanup function must be called once the caller is done with
 // the export, even if Export returned an error from a later call.
 func Export(ctx context.Context, pkgType store.PackageType, name, tag string) (path string, cleanup func(), err error) {
-	tempDir, err := os.MkdirTemp("", "svn-checkout-*")
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to create temporary directory: %w", err)
-	}
-
 	var svnTagUrl string
 	switch pkgType {
 	case store.Plugin:
-		svnTagUrl = fmt.Sprintf("%s/%s/tags/%s", pluginsSvnRepo, name, tag)
+		svnTagUrl = pluginsSvnRepo + "/" + name + "/tags/" + tag
 	case store.Theme:
-		svnTagUrl = fmt.Sprintf("%s/%s/%s", themesSvnRepo, name, tag)
+		svnTagUrl = themesSvnRepo + "/" + name + "/" + tag
 	default:
 		return "", nil, fmt.Errorf("invalid package type: %s", pkgType)
+	}
+
+	tempDir, err := os.MkdirTemp("", "svn-checkout-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to create temporary directory: %w", err)
 	}
 
 	checkoutPath := filepath.Join(tempDir, name, tag)
