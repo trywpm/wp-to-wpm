@@ -55,13 +55,23 @@ jobs:
 
       - name: commit refreshed state
         run: |
-          MSG="update: refresh whitelists and closures"
-          if [ "${{ inputs.revalidate }}" = "true" ]; then
-            MSG="update (revalidated): prune non-permanent closures and refresh"
-          fi
           git pull origin main
           git add themes.json plugins.json conflicts.json closed-themes.json closed-plugins.json
-          git diff --cached --quiet || git commit -m "$MSG"
+          if git diff --cached --quiet; then
+            echo "no changes to commit"
+            exit 0
+          fi
+          SUBJECT="update: refresh whitelists and closure status"
+          if [ "${{ inputs.revalidate }}" = "true" ]; then
+            SUBJECT="update: revalidate closures, refresh whitelists"
+          fi
+          BODY=$(printf 'themes=%s plugins=%s conflicts=%s closed-themes=%s closed-plugins=%s' \
+            "$(jq 'length' themes.json)" \
+            "$(jq 'length' plugins.json)" \
+            "$(jq 'length' conflicts.json)" \
+            "$(jq 'length' closed-themes.json)" \
+            "$(jq 'length' closed-plugins.json)")
+          git commit -m "$SUBJECT" -m "$BODY"
 
       - name: push
         run: |
