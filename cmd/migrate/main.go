@@ -1,21 +1,33 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
+	"slices"
+	"strings"
 	"syscall"
 	"time"
 	"wpm-migration/pkg/store"
 	"wpm-migration/pkg/svn"
+	"wpm-migration/pkg/version"
+	"wpm-migration/pkg/wporg"
 
 	"github.com/newrelic/go-agent/v3/integrations/logcontext-v2/zerologWriter"
 	"github.com/newrelic/go-agent/v3/newrelic"
 	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
+)
+
+var (
+	httpClient = &http.Client{Timeout: 30 * time.Second}
 )
 
 type Options struct {
@@ -25,24 +37,171 @@ type Options struct {
 	logger        *zerolog.Logger
 }
 
-func run(ctx context.Context, o Options, packages []string) error {
-	for _, pkg := range packages {
-		o.logger.Info().Str("package", pkg).Msg("Migrating package")
-	}
+// wpmExec executes a wpm command with the given args in the specified working directory.
+func wpmExec(ctx context.Context, cwd string, args ...string) error {
+	cmd := exec.CommandContext(ctx, "wpm", args...)
+	cmd.Dir = cwd
 
-	// @todo: Implement the actual migration logic here, including:
-	// - Fetching package details from the WordPress.org API
-	// - Creating corresponding entries in the wpm registry
-	// - Handling any necessary data transformations
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("wpm command failed: %w, stderr: %s", err, strings.TrimSpace(stderr.String()))
+	}
 
 	return nil
 }
 
-type svnLogEntry struct {
-	Revision string `xml:"revision,attr"`
-	Paths    []struct {
-		Path string `xml:",chardata"`
-	} `xml:"paths>path"`
+// getPublishedVersions fetches the list of published versions for a given package from the wpm registry.
+func getPublishedVersions(ctx context.Context, registry, slug string) (map[string]struct{}, error) {
+	url := "https://" + registry + "/" + slug
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request for %s: %w", url, err)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch versions from %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	versions := make(map[string]struct{})
+
+	if resp.StatusCode == http.StatusNotFound {
+		return versions, nil // No versions exist yet, return empty map
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("bad status from registry %s: %s", url, resp.Status)
+	}
+
+	var r struct {
+		Versions []string `json:"versions"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		return nil, fmt.Errorf("failed to decode registry response from %s: %w", url, err)
+	}
+
+	for _, v := range r.Versions {
+		versions[v] = struct{}{}
+	}
+
+	return versions, nil
+}
+
+func run(ctx context.Context, o Options, packages []string) error {
+	pkgType := store.PackageType(o.migrationType)
+	if !pkgType.Valid() {
+		return fmt.Errorf("invalid migration type: %s", o.migrationType)
+	}
+
+	o.logger.Info().Str("type", o.migrationType).Int("count", len(packages)).Msg("Starting migration")
+
+	whitelisted, err := store.GetPackages(pkgType)
+	if err != nil {
+		return fmt.Errorf("failed to get whitelisted %s: %w", pkgType, err)
+	}
+
+	closedPackages, err := store.GetClosedPackages(pkgType)
+	if err != nil {
+		return fmt.Errorf("failed to get closed %s: %w", pkgType, err)
+	}
+
+	wpClient := wporg.New(wporg.WithConcurrency(2))
+
+	for _, pkg := range packages {
+		pkgLogger := o.logger.With().Str("package", pkg).Logger()
+
+		pkgLogger.Info().Msgf("Migrating %s", pkgType)
+
+		if _, ok := closedPackages[pkg]; ok {
+			pkgLogger.Warn().Msgf("Skipping closed %s", pkgType)
+			continue // Skip closed packages
+		}
+
+		if !slices.Contains(whitelisted, pkg) {
+			pkgLogger.Warn().Msgf("Skipping non-whitelisted %s", pkgType)
+			continue // Skip packages not in the whitelist
+		}
+
+		info, err := wpClient.FetchPackageInfo(ctx, pkgType, pkg)
+		if err != nil {
+			pkgLogger.Error().Err(err).Msgf("Failed to fetch info for %s", pkgType)
+			continue
+		}
+
+		if info.Error != "" && info.Version == "" {
+			pkgLogger.Error().Str("error", info.Error).Msgf("Skipping closed %s with no version info", pkgType)
+			continue
+		}
+
+		publishedVersions, err := getPublishedVersions(ctx, o.registry, pkg)
+		if err != nil {
+			pkgLogger.Error().Err(err).Msg("Failed to fetch published versions")
+			continue
+		}
+
+		tags, err := svn.ListTags(ctx, pkgType, pkg)
+		if err != nil {
+			pkgLogger.Error().Err(err).Msg("Failed to list SVN tags")
+			continue
+		}
+
+		tagsToMigrate := make([]string, 0, len(tags))
+		for tag := range tags {
+			normalized, err := version.Normalize(tag)
+			if err != nil {
+				continue // Skip tags that can't be normalized as versions
+			}
+
+			if _, exists := publishedVersions[normalized]; !exists {
+				tagsToMigrate = append(tagsToMigrate, tag)
+			}
+		}
+
+		if len(tagsToMigrate) == 0 {
+			pkgLogger.Info().Msg("No new versions to migrate")
+			continue
+		}
+
+		var eg errgroup.Group
+		eg.SetLimit(o.concurrency)
+
+		for _, tag := range tagsToMigrate {
+			if ctx.Err() != nil {
+				break
+			}
+
+			tag := tag
+
+			eg.Go(func() error {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+
+				pkgLogger := pkgLogger.With().Str("tag", tag).Logger()
+
+				pkgLogger.Info().Msgf("Migrating tag %s", tag)
+
+				// @todo: add wpm publish
+
+				return nil
+			})
+		}
+
+		if err := eg.Wait(); err != nil {
+			if ctx.Err() != nil {
+				pkgLogger.Warn().Msg("Migration interrupted")
+				return nil
+			}
+
+			pkgLogger.Error().Err(err).Msg("Failed to migrate all tags")
+			continue
+		}
+	}
+
+	return nil
 }
 
 func main() {
@@ -82,8 +241,26 @@ func main() {
 				}
 			}
 
+			if headRev <= rev {
+				opts.logger.Info().Int("last_revision", rev).Msg("No new revisions to migrate")
+				return nil
+			}
+
+			if len(args) == 0 {
+				opts.logger.Info().
+					Int("last_revision", rev).
+					Int("head_revision", headRev).
+					Msg("No new packages found to migrate")
+				return nil
+			}
+
 			if err := run(cmd.Context(), opts, args); err != nil {
 				return fmt.Errorf("migration failed: %w", err)
+			}
+
+			if cmd.Context().Err() != nil {
+				opts.logger.Warn().Msg("Migration interrupted, exiting...")
+				return nil
 			}
 
 			if headRev > rev {
@@ -96,7 +273,7 @@ func main() {
 		},
 	}
 
-	cmd.Flags().IntVarP(&opts.concurrency, "concurrency", "c", 5, "Number of concurrent migrations")
+	cmd.Flags().IntVarP(&opts.concurrency, "concurrency", "c", 2, "Number of concurrent migrations")
 
 	cmd.Flags().StringVarP(&opts.registry, "registry", "r", "registry.wpm.so", "wpm registry url")
 	cmd.Flags().StringVarP(&opts.migrationType, "type", "t", "", "Type of migration (plugin or theme)")
