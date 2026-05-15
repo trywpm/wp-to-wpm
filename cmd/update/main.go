@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"flag"
-	"fmt"
-	"log"
 	"maps"
 	"os"
 	"os/exec"
@@ -15,18 +13,27 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"wpm-migration/pkg/store"
 	"wpm-migration/pkg/svn"
 	"wpm-migration/pkg/wporg"
 
+	"github.com/rs/zerolog"
 	"golang.org/x/sync/errgroup"
 )
 
+const progressEvery uint64 = 5000
+
 func main() {
-	_, err := exec.LookPath("svn")
-	if err != nil {
-		log.Fatalf("svn command not found: %v", err)
+	zerolog.TimeFieldFormat = time.RFC3339
+	logger := zerolog.New(zerolog.ConsoleWriter{
+		Out:        os.Stderr,
+		TimeFormat: time.DateTime,
+	}).With().Timestamp().Logger()
+
+	if _, err := exec.LookPath("svn"); err != nil {
+		logger.Fatal().Err(err).Msg("svn command not found")
 	}
 
 	var workers int
@@ -37,10 +44,13 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	log.Printf("fetching themes and plugins list from svn with %d workers...", workers)
+	runStart := time.Now()
+	logger.Info().Int("workers", workers).Msg("Starting update")
+
+	svnStart := time.Now()
+	logger.Info().Msg("Fetching SVN listings")
 
 	eg, svnCtx := errgroup.WithContext(ctx)
-
 	var themes, plugins map[string]struct{}
 
 	eg.Go(func() error {
@@ -55,7 +65,7 @@ func main() {
 	})
 
 	if err := eg.Wait(); err != nil {
-		log.Fatalf("failed to fetch data: %v", err)
+		logger.Fatal().Err(err).Msg("Failed to fetch SVN listings")
 	}
 
 	// wp.org hosts many thousands of themes and plugins. A listing that
@@ -64,8 +74,18 @@ func main() {
 	// refuse to overwrite the JSON files rather than mass-evict every
 	// existing package as "not-whitelisted" on the next migrate run.
 	if len(themes) < 1000 || len(plugins) < 1000 {
-		log.Fatalf("svn listing returned suspiciously few entries (themes=%d, plugins=%d); refusing to overwrite", len(themes), len(plugins))
+		logger.Fatal().
+			Int("themes", len(themes)).
+			Int("plugins", len(plugins)).
+			Int("threshold", 1000).
+			Msg("SVN listing returned suspiciously few entries; refusing to overwrite")
 	}
+
+	logger.Info().
+		Int("themes", len(themes)).
+		Int("plugins", len(plugins)).
+		Dur("duration", time.Since(svnStart)).
+		Msg("SVN listings fetched")
 
 	var conflicts []string
 	for theme := range themes {
@@ -73,7 +93,6 @@ func main() {
 			conflicts = append(conflicts, theme)
 		}
 	}
-
 	for _, conflict := range conflicts {
 		delete(themes, conflict)
 		delete(plugins, conflict)
@@ -81,52 +100,70 @@ func main() {
 
 	resolved, err := store.GetResolved()
 	if err != nil {
-		log.Printf("warning: failed to read resolved json: %v", err)
+		logger.Warn().Err(err).Msg("Failed to read resolved.json; treating as empty")
 	}
 
 	resolvedThemes := make(map[string]struct{}, len(resolved.Themes))
 	for _, t := range resolved.Themes {
 		resolvedThemes[t] = struct{}{}
 	}
+	resolvedPlugins := make(map[string]struct{}, len(resolved.Plugins))
 	for _, p := range resolved.Plugins {
 		if _, dup := resolvedThemes[p]; dup {
-			log.Fatalf("resolved.json: %q is listed under both themes and plugins", p)
+			logger.Fatal().Str("slug", p).Msg("resolved.json lists slug under both themes and plugins")
 		}
+		resolvedPlugins[p] = struct{}{}
 	}
 
+	var reapplyAsTheme, reapplyAsPlugin int
 	for _, conflict := range conflicts {
 		if _, ok := resolvedThemes[conflict]; ok {
 			themes[conflict] = struct{}{}
-		} else if slices.Contains(resolved.Plugins, conflict) {
+			reapplyAsTheme++
+		} else if _, ok := resolvedPlugins[conflict]; ok {
 			plugins[conflict] = struct{}{}
+			reapplyAsPlugin++
 		}
 	}
+
+	logger.Info().
+		Int("conflicts", len(conflicts)).
+		Int("reapplied_as_theme", reapplyAsTheme).
+		Int("reapplied_as_plugin", reapplyAsPlugin).
+		Int("unresolved", len(conflicts)-reapplyAsTheme-reapplyAsPlugin).
+		Msg("Resolved theme/plugin conflicts")
 
 	themesList := slices.Sorted(maps.Keys(themes))
 	pluginsList := slices.Sorted(maps.Keys(plugins))
 	slices.Sort(conflicts)
 
 	if err := store.SetThemes(themesList); err != nil {
-		log.Fatalf("failed to write themes json: %v", err)
+		logger.Fatal().Err(err).Msg("Failed to write themes.json")
 	}
 	if err := store.SetPlugins(pluginsList); err != nil {
-		log.Fatalf("failed to write plugins json: %v", err)
+		logger.Fatal().Err(err).Msg("Failed to write plugins.json")
 	}
 	if err := store.SetConflicts(conflicts); err != nil {
-		log.Fatalf("failed to write conflicts json: %v", err)
+		logger.Fatal().Err(err).Msg("Failed to write conflicts.json")
 	}
 
-	log.Println("successfully updated themes, plugins and conflicts packages data.")
+	logger.Info().
+		Int("themes", len(themesList)).
+		Int("plugins", len(pluginsList)).
+		Int("conflicts", len(conflicts)).
+		Msg("Wrote package lists")
 
 	closedThemes, err := store.GetClosedThemes()
 	if err != nil {
-		log.Printf("warning: failed to read closed themes json: %v", err)
+		logger.Warn().Err(err).Msg("Failed to read closed-themes.json; starting from empty")
 	}
-
 	closedPlugins, err := store.GetClosedPlugins()
 	if err != nil {
-		log.Printf("warning: failed to read closed plugins json: %v", err)
+		logger.Warn().Err(err).Msg("Failed to read closed-plugins.json; starting from empty")
 	}
+
+	existingClosedThemes := len(closedThemes)
+	existingClosedPlugins := len(closedPlugins)
 
 	themesToFetch := make([]string, 0, len(themesList))
 	for _, t := range themesList {
@@ -134,7 +171,6 @@ func main() {
 			themesToFetch = append(themesToFetch, t)
 		}
 	}
-
 	pluginsToFetch := make([]string, 0, len(pluginsList))
 	for _, p := range pluginsList {
 		if _, ok := closedPlugins[p]; !ok {
@@ -144,30 +180,44 @@ func main() {
 
 	wpClient := wporg.New(wporg.WithConcurrency(workers * 2))
 
+	var (
+		themesMu, pluginsMu sync.Mutex
+		fetchedCount        atomic.Uint64
+		themeErrors         atomic.Uint64
+		pluginErrors        atomic.Uint64
+	)
+
+	totalToFetch := len(themesToFetch) + len(pluginsToFetch)
+	fetchStart := time.Now()
+	logger.Info().
+		Int("themes", len(themesToFetch)).
+		Int("plugins", len(pluginsToFetch)).
+		Int("total", totalToFetch).
+		Int("concurrency", workers).
+		Msg("Fetching package metadata")
+
+	tickProgress := func() {
+		if n := fetchedCount.Add(1); n%progressEvery == 0 {
+			logger.Info().
+				Uint64("fetched", n).
+				Int("total", totalToFetch).
+				Msg("Metadata progress")
+		}
+	}
+
 	var updateEg errgroup.Group
-	var fetchedCount atomic.Uint32
-	var themesMu, pluginsMu sync.Mutex
 
-	log.Println("fetching info for themes and plugins to determine closures...")
-
-	// Worker 1: Updating Themes
+	// Worker 1: Themes
 	updateEg.Go(func() error {
-		egThemes := new(errgroup.Group)
-		egThemes.SetLimit(workers)
-
+		eg := new(errgroup.Group)
+		eg.SetLimit(workers)
 		for _, t := range themesToFetch {
 			themeSlug := t
-
-			egThemes.Go(func() error {
+			eg.Go(func() error {
 				if ctx.Err() != nil {
 					return nil
 				}
-				defer func() {
-					if fetchedCount.Add(1)%1000 == 0 {
-						fmt.Print(".")
-						os.Stdout.Sync()
-					}
-				}()
+				defer tickProgress()
 
 				info, err := wpClient.FetchThemeInfo(ctx, themeSlug)
 				if err != nil {
@@ -176,8 +226,13 @@ func main() {
 						closedThemes[themeSlug] = store.ClosureUnknown
 						themesMu.Unlock()
 					} else if ctx.Err() == nil {
-						// Don't fail the entire process, just log temporary failures.
-						log.Printf("failed to fetch info for theme %s: %v", themeSlug, err)
+						themeErrors.Add(1)
+						logger.Error().
+							Err(err).
+							Str("type", "theme").
+							Str("package", themeSlug).
+							Str("step", "fetch-info").
+							Msg("Package error")
 					}
 					return nil
 				}
@@ -190,28 +245,20 @@ func main() {
 				return nil
 			})
 		}
-
-		return egThemes.Wait()
+		return eg.Wait()
 	})
 
-	// Worker 2: Updating Plugins
+	// Worker 2: Plugins
 	updateEg.Go(func() error {
-		egPlugins := new(errgroup.Group)
-		egPlugins.SetLimit(workers)
-
+		eg := new(errgroup.Group)
+		eg.SetLimit(workers)
 		for _, p := range pluginsToFetch {
 			pluginSlug := p
-
-			egPlugins.Go(func() error {
+			eg.Go(func() error {
 				if ctx.Err() != nil {
 					return nil
 				}
-				defer func() {
-					if fetchedCount.Add(1)%1000 == 0 {
-						fmt.Print(".")
-						os.Stdout.Sync()
-					}
-				}()
+				defer tickProgress()
 
 				info, err := wpClient.FetchPluginInfo(ctx, pluginSlug)
 				if err != nil {
@@ -220,23 +267,25 @@ func main() {
 						closedPlugins[pluginSlug] = store.ClosureUnknown
 						pluginsMu.Unlock()
 					} else if ctx.Err() == nil {
-						// Don't fail the entire process, just log temporary failures.
-						log.Printf("failed to fetch info for plugin %s: %v", pluginSlug, err)
+						pluginErrors.Add(1)
+						logger.Error().
+							Err(err).
+							Str("type", "plugin").
+							Str("package", pluginSlug).
+							Str("step", "fetch-info").
+							Msg("Package error")
 					}
 					return nil
 				}
 
 				if info != nil && info.Error != "" {
 					closureType := store.ClosureUnknown
-
 					if info.Error == "closed" {
 						closureType = store.ClosureTemporary
-
 						if strings.Contains(info.Description, "This closure is permanent.") {
 							closureType = store.ClosurePermanent
 						}
 					}
-
 					pluginsMu.Lock()
 					closedPlugins[pluginSlug] = closureType
 					pluginsMu.Unlock()
@@ -244,46 +293,46 @@ func main() {
 				return nil
 			})
 		}
-
-		return egPlugins.Wait()
+		return eg.Wait()
 	})
 
-	if err := updateEg.Wait(); err != nil {
-		fmt.Println()
-		log.Printf("workers finished with some errors: %v", err)
-	} else {
-		fmt.Println()
-	}
+	// Inner errgroups always return nil — per-package errors are logged in
+	// place, not returned. updateEg.Wait is therefore guaranteed nil.
+	_ = updateEg.Wait()
+
+	logger.Info().
+		Uint64("fetched", fetchedCount.Load()).
+		Uint64("theme_errors", themeErrors.Load()).
+		Uint64("plugin_errors", pluginErrors.Load()).
+		Dur("duration", time.Since(fetchStart)).
+		Msg("Package metadata fetched")
 
 	if err := store.SetClosedThemes(closedThemes); err != nil {
-		log.Fatalf("failed to write closed themes json: %v", err)
+		logger.Fatal().Err(err).Msg("Failed to write closed-themes.json")
 	}
 	if err := store.SetClosedPlugins(closedPlugins); err != nil {
-		log.Fatalf("failed to write closed plugins json: %v", err)
+		logger.Fatal().Err(err).Msg("Failed to write closed-plugins.json")
 	}
 
-	log.Println("successfully updated closed packages data")
+	logger.Info().
+		Int("closed_themes", len(closedThemes)).
+		Int("closed_plugins", len(closedPlugins)).
+		Int("added_themes", len(closedThemes)-existingClosedThemes).
+		Int("added_plugins", len(closedPlugins)-existingClosedPlugins).
+		Msg("Wrote closure lists")
 
-	log.Printf("themes=%d plugins=%d conflicts=%d (resolved=%d) closed-themes=%d closed-plugins=%d",
-		len(themesList), len(pluginsList), len(conflicts),
-		intersectCount(conflicts, resolvedThemes, resolved.Plugins),
-		len(closedThemes), len(closedPlugins))
-}
-
-func intersectCount(conflicts []string, resolvedThemes map[string]struct{}, resolvedPlugins []string) int {
-	resolvedPluginsSet := make(map[string]struct{}, len(resolvedPlugins))
-	for _, p := range resolvedPlugins {
-		resolvedPluginsSet[p] = struct{}{}
+	ev := logger.Info()
+	msg := "Update finished"
+	if ctx.Err() != nil {
+		ev = logger.Warn()
+		msg = "Update interrupted"
 	}
-	n := 0
-	for _, c := range conflicts {
-		if _, ok := resolvedThemes[c]; ok {
-			n++
-			continue
-		}
-		if _, ok := resolvedPluginsSet[c]; ok {
-			n++
-		}
-	}
-	return n
+	ev.
+		Dur("duration", time.Since(runStart)).
+		Int("themes", len(themesList)).
+		Int("plugins", len(pluginsList)).
+		Int("conflicts", len(conflicts)).
+		Int("closed_themes", len(closedThemes)).
+		Int("closed_plugins", len(closedPlugins)).
+		Msg(msg)
 }
