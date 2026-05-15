@@ -47,6 +47,23 @@ func main() {
 	runStart := time.Now()
 	logger.Info().Int("workers", workers).Msg("Starting update")
 
+	oldThemesList, err := store.GetThemes()
+	if err != nil {
+		logger.Fatal().Err(err).Msg("Failed to snapshot existing themes.json; aborting before backfill diff can over-trigger")
+	}
+	oldPluginsList, err := store.GetPlugins()
+	if err != nil {
+		logger.Fatal().Err(err).Msg("Failed to snapshot existing plugins.json; aborting before backfill diff can over-trigger")
+	}
+	oldThemes := make(map[string]struct{}, len(oldThemesList))
+	for _, t := range oldThemesList {
+		oldThemes[t] = struct{}{}
+	}
+	oldPlugins := make(map[string]struct{}, len(oldPluginsList))
+	for _, p := range oldPluginsList {
+		oldPlugins[p] = struct{}{}
+	}
+
 	svnStart := time.Now()
 	logger.Info().Msg("Fetching SVN listings")
 
@@ -321,6 +338,39 @@ func main() {
 		Int("added_plugins", len(closedPlugins)-existingClosedPlugins).
 		Msg("Wrote closure lists")
 
+	backfillThemes := make([]string, 0)
+	for _, t := range themesList {
+		if _, wasOld := oldThemes[t]; wasOld {
+			continue
+		}
+		if _, isClosed := closedThemes[t]; isClosed {
+			continue
+		}
+		backfillThemes = append(backfillThemes, t)
+	}
+	backfillPlugins := make([]string, 0)
+	for _, p := range pluginsList {
+		if _, wasOld := oldPlugins[p]; wasOld {
+			continue
+		}
+		if _, isClosed := closedPlugins[p]; isClosed {
+			continue
+		}
+		backfillPlugins = append(backfillPlugins, p)
+	}
+
+	if err := writePendingBackfill("pending-backfill-themes.txt", backfillThemes); err != nil {
+		logger.Error().Err(err).Msg("Failed to write pending-backfill-themes.txt")
+	}
+	if err := writePendingBackfill("pending-backfill-plugins.txt", backfillPlugins); err != nil {
+		logger.Error().Err(err).Msg("Failed to write pending-backfill-plugins.txt")
+	}
+
+	logger.Info().
+		Int("themes", len(backfillThemes)).
+		Int("plugins", len(backfillPlugins)).
+		Msg("Wrote pending-backfill files")
+
 	ev := logger.Info()
 	msg := "Update finished"
 	if ctx.Err() != nil {
@@ -335,4 +385,13 @@ func main() {
 		Int("closed_themes", len(closedThemes)).
 		Int("closed_plugins", len(closedPlugins)).
 		Msg(msg)
+}
+
+// writePendingBackfill writes a newline-delimited list of slugs to path.
+func writePendingBackfill(path string, slugs []string) error {
+	var data []byte
+	if len(slugs) > 0 {
+		data = []byte(strings.Join(slugs, "\n") + "\n")
+	}
+	return os.WriteFile(path, data, 0644)
 }
