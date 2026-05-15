@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -111,6 +112,10 @@ func run(ctx context.Context, o Options, packages []string) error {
 	wpClient := wporg.New(wporg.WithConcurrency(2))
 
 	for _, pkg := range packages {
+		if ctx.Err() != nil {
+			return nil
+		}
+
 		pkgLogger := o.logger.With().Str("package", pkg).Logger()
 
 		pkgLogger.Info().Msgf("Migrating %s", pkgType)
@@ -127,6 +132,9 @@ func run(ctx context.Context, o Options, packages []string) error {
 
 		info, err := wpClient.FetchPackageInfo(ctx, pkgType, pkg)
 		if err != nil {
+			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+				return nil
+			}
 			pkgLogger.Error().Err(err).Msgf("Failed to fetch info for %s", pkgType)
 			continue
 		}
@@ -241,11 +249,7 @@ func main() {
 				}
 			}
 
-			if headRev <= rev {
-				opts.logger.Info().Int("last_revision", rev).Msg("No new revisions to migrate")
-				return nil
-			}
-
+			// bail if still no packages to migrate after fetching updates
 			if len(args) == 0 {
 				opts.logger.Info().
 					Int("last_revision", rev).
