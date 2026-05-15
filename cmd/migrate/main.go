@@ -385,6 +385,12 @@ func main() {
 				return fmt.Errorf("failed to get last SVN revision: %w", err)
 			}
 
+			// Zero rev pointer means the state file is missing, empty,
+			// or literally "0".
+			if rev == 0 && len(args) == 0 {
+				return fmt.Errorf("refusing to scan svn from rev 1: .%s_last_rev is missing or 0. Initialize it to a recent revision, or invoke with explicit slugs to bootstrap", pkgType)
+			}
+
 			var headRev int
 			if len(args) == 0 {
 				args, headRev, err = svn.GetUpdatedPackages(cmd.Context(), pkgType, rev+1)
@@ -394,6 +400,13 @@ func main() {
 					}
 					return fmt.Errorf("failed to get updated packages: %w", err)
 				}
+			}
+
+			// A single migrate run should never process thousands of
+			// packages.
+			const maxPackagesPerRun = 1000
+			if len(args) > maxPackagesPerRun {
+				return fmt.Errorf("svn log returned %d packages (safety cap %d). Advance .%s_last_rev closer to HEAD and re-run, or invoke with a smaller explicit slug list", len(args), maxPackagesPerRun, pkgType)
 			}
 
 			// bail if still no packages to migrate after fetching updates
