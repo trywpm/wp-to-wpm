@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+	"wpm-migration/pkg/store"
 )
 
 const (
@@ -119,6 +120,17 @@ func (c *Client) FetchThemeInfo(ctx context.Context, slug string) (*Info, error)
 
 func (c *Client) FetchPluginInfo(ctx context.Context, slug string) (*Info, error) {
 	return c.doRequest(ctx, pluginApiUrlWithParams+"&request%5Bslug%5D="+url.QueryEscape(slug))
+}
+
+func (c *Client) FetchPackageInfo(ctx context.Context, pkgType store.PackageType, slug string) (*Info, error) {
+	switch pkgType {
+	case store.Theme:
+		return c.FetchThemeInfo(ctx, slug)
+	case store.Plugin:
+		return c.FetchPluginInfo(ctx, slug)
+	default:
+		return nil, fmt.Errorf("invalid package type: %s", pkgType)
+	}
 }
 
 func (c *Client) doRequest(ctx context.Context, reqURL string) (*Info, error) {
