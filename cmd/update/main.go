@@ -9,10 +9,12 @@ import (
 	"maps"
 	"os"
 	"os/exec"
+	"os/signal"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 
 	"wpm-migration/pkg/store"
 	"wpm-migration/pkg/svn"
@@ -32,7 +34,8 @@ func main() {
 	flag.IntVar(&workers, "worker", 50, "Number of concurrent workers (alias)")
 	flag.Parse()
 
-	ctx := context.Background()
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
+	defer cancel()
 
 	log.Printf("fetching themes and plugins list from svn with %d workers...", workers)
 
@@ -116,14 +119,14 @@ func main() {
 		log.Printf("warning: failed to read closed plugins json: %v", err)
 	}
 
-	var themesToFetch []string
+	themesToFetch := make([]string, 0, len(themesList))
 	for _, t := range themesList {
 		if _, ok := closedThemes[t]; !ok {
 			themesToFetch = append(themesToFetch, t)
 		}
 	}
 
-	var pluginsToFetch []string
+	pluginsToFetch := make([]string, 0, len(pluginsList))
 	for _, p := range pluginsList {
 		if _, ok := closedPlugins[p]; !ok {
 			pluginsToFetch = append(pluginsToFetch, p)
@@ -147,6 +150,9 @@ func main() {
 			themeSlug := t
 
 			egThemes.Go(func() error {
+				if ctx.Err() != nil {
+					return nil
+				}
 				defer func() {
 					if fetchedCount.Add(1)%1000 == 0 {
 						fmt.Print(".")
@@ -160,7 +166,7 @@ func main() {
 						themesMu.Lock()
 						closedThemes[themeSlug] = store.ClosureUnknown
 						themesMu.Unlock()
-					} else {
+					} else if ctx.Err() == nil {
 						// Don't fail the entire process, just log temporary failures.
 						log.Printf("failed to fetch info for theme %s: %v", themeSlug, err)
 					}
@@ -188,6 +194,9 @@ func main() {
 			pluginSlug := p
 
 			egPlugins.Go(func() error {
+				if ctx.Err() != nil {
+					return nil
+				}
 				defer func() {
 					if fetchedCount.Add(1)%1000 == 0 {
 						fmt.Print(".")
@@ -201,7 +210,7 @@ func main() {
 						pluginsMu.Lock()
 						closedPlugins[pluginSlug] = store.ClosureUnknown
 						pluginsMu.Unlock()
-					} else {
+					} else if ctx.Err() == nil {
 						// Don't fail the entire process, just log temporary failures.
 						log.Printf("failed to fetch info for plugin %s: %v", pluginSlug, err)
 					}
