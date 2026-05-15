@@ -99,11 +99,16 @@ func list(ctx context.Context, svnRepo string, isValid func([]byte) bool) (map[s
 	}
 	defer resp.Body.Close()
 
+	list := make(map[string]struct{})
+
+	// if tags don't exist, maybe it's a new package with no tags yet.
+	if resp.StatusCode == http.StatusNotFound {
+		return list, nil
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("failed to fetch repo %s, status code: %d", svnRepo, resp.StatusCode)
 	}
-
-	list := make(map[string]struct{})
 	z := html.NewTokenizer(resp.Body)
 
 	ulDepth := 0
@@ -278,7 +283,10 @@ func UpdatedThemes(ctx context.Context, startRev int) ([]string, int, error) {
 	return GetUpdatedPackages(ctx, store.Theme, startRev)
 }
 
-func export(ctx context.Context, pkgType store.PackageType, name, tag string) (path string, cleanup func(), err error) {
+// Export checks out a single tag of a package from SVN into a temp directory.
+// The returned cleanup function must be called once the caller is done with
+// the export, even if Export returned an error from a later call.
+func Export(ctx context.Context, pkgType store.PackageType, name, tag string) (path string, cleanup func(), err error) {
 	tempDir, err := os.MkdirTemp("", "svn-checkout-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to create temporary directory: %w", err)
