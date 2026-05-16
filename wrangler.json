@@ -1,0 +1,15 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "wp-to-wpm",
+  "main": "worker.ts",
+  "compatibility_date": "2026-05-01",
+  "triggers": {
+    "crons": ["*/15 * * * *", "0 0,12 * * *"]
+  },
+  "kv_namespaces": [
+    {
+      "binding": "kv",
+      "id": "b8f9f8fd552e49d485d6b3e48c580b35"
+    }
+  ]
+}
