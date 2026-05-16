@@ -11,13 +11,17 @@ import (
 
 const maxVersionLength = 64
 
-var trailingAlphaSuffix = regexp.MustCompile(`^(\d+(?:\.\d+){0,2})([A-Za-z][A-Za-z0-9.]*)$`)
+var (
+	numericIdentifier   = regexp.MustCompile(`^\d+$`)
+	trailingAlphaSuffix = regexp.MustCompile(`^(\d+(?:\.\d+){0,2})([A-Za-z][A-Za-z0-9.]*)$`)
+)
 
 // Normalize converts a version string into strict semver format (X.Y.Z[-prerelease][+build]).
 //
 // It handles common PHP/WordPress patterns:
 //   - leading 'v' or 'V' prefix (v1.2.3 -> 1.2.3)
-//   - leading zeros (01.0.0 -> 1.0.0)
+//   - leading zeros in core segments (01.0.0 -> 1.0.0)
+//   - leading zeros in numeric prerelease segments (1.0.0.01 -> 1.0.0-1)
 //   - short forms (1, 1.2 -> 1.0.0, 1.2.0)
 //   - alphabetic suffixes without separator (1.0.0beta -> 1.0.0-beta)
 //   - 4+ dotted segments collapsed into prerelease (1.0.0.0 -> 1.0.0-0)
@@ -29,36 +33,76 @@ func Normalize(version string) (string, error) {
 	if version == "" {
 		return "", errors.New("version cannot be empty")
 	}
-	if len(version) > maxVersionLength {
-		return "", fmt.Errorf("input version length %d exceeds maximum of %d", len(version), maxVersionLength)
-	}
 
 	// Fast path for already-normalized versions.
 	if v, err := semver.StrictNewVersion(version); err == nil {
-		return v.String(), nil
+		if len(version) <= maxVersionLength {
+			return v.String(), nil
+		}
 	}
 
-	// Strip a single leading 'v' or 'V'.
-	if version[0] == 'v' || version[0] == 'V' {
-		version = version[1:]
+	version = strings.TrimLeft(version, "vV")
+	if version == "" {
+		return "", errors.New("version contains only 'v' prefixes")
+	}
+
+	// Isolate the core version from prerelease/build metadata to prevent
+	// mangling valid semver extensions (e.g., dotted prereleases) below.
+	core := version
+	var meta string
+
+	idxPre := strings.IndexByte(version, '-')
+	idxBld := strings.IndexByte(version, '+')
+	cutoff := -1
+
+	if idxPre != -1 {
+		cutoff = idxPre
+	}
+	if idxBld != -1 && (cutoff == -1 || idxBld < cutoff) {
+		cutoff = idxBld
+	}
+
+	if cutoff != -1 {
+		core = version[:cutoff]
+		meta = version[cutoff:]
 	}
 
 	// Insert hyphen before an alphabetic qualifier with no separator.
 	// 1.0.0beta1 -> 1.0.0-beta1,  2.1rc1 -> 2.1-rc1,  3.0a -> 3.0-a
-	version = trailingAlphaSuffix.ReplaceAllString(version, "$1-$2")
+	core = trailingAlphaSuffix.ReplaceAllString(core, "$1-$2")
 
-	// Collapse 4+ dotted segments into a prerelease.
+	// If the regex introduced a hyphen, move that new suffix into meta.
+	if idx := strings.IndexByte(core, '-'); idx != -1 {
+		meta = core[idx:] + meta
+		core = core[:idx]
+	}
+
+	// Collapse 4+ dotted segments into a prerelease, stripping leading zeros
+	// from any purely numeric segment (semver forbids them in numeric IDs).
 	// 1.0.0.0       -> 1.0.0-0
+	// 1.0.0.01      -> 1.0.0-1
+	// 1.0.0.01.02   -> 1.0.0-1.2
 	// 1.2.3.4.5     -> 1.2.3-4.5
 	// 1.0.0.alpha.1 -> 1.0.0-alpha.1
-	if parts := strings.Split(version, "."); len(parts) > 3 {
-		version = fmt.Sprintf("%s.%s.%s-%s",
-			parts[0], parts[1], parts[2],
-			strings.Join(parts[3:], "."))
+	// 1.0.0.0beta   -> 1.0.0-0beta  (mixed; left alone)
+	if parts := strings.Split(core, "."); len(parts) > 3 {
+		pre := make([]string, len(parts)-3)
+		for i, p := range parts[3:] {
+			pre[i] = stripLeadingZeros(p)
+		}
+		core = fmt.Sprintf("%s.%s.%s", parts[0], parts[1], parts[2])
+
+		// Prepend the collapsed segments to any existing metadata
+		if meta == "" || meta[0] == '+' {
+			meta = "-" + strings.Join(pre, ".") + meta
+		} else {
+			// Merge with existing prerelease by replacing the initial '-' with a '.'
+			meta = "-" + strings.Join(pre, ".") + "." + meta[1:]
+		}
 	}
 
 	// Coerce to semver, which will handle leading zeros and short forms.
-	v, err := semver.NewVersion(version)
+	v, err := semver.NewVersion(core + meta)
 	if err != nil {
 		return "", fmt.Errorf("cannot normalize %q to semver: %w", version, err)
 	}
@@ -74,4 +118,15 @@ func Normalize(version string) (string, error) {
 	}
 
 	return result, nil
+}
+
+func stripLeadingZeros(s string) string {
+	if !numericIdentifier.MatchString(s) {
+		return s
+	}
+	trimmed := strings.TrimLeft(s, "0")
+	if trimmed == "" {
+		return "0"
+	}
+	return trimmed
 }
