@@ -1,0 +1,53 @@
+---
+name: migrate-by-name
+
+on:
+  workflow_dispatch:
+    inputs:
+      type:
+        description: Package type to migrate.
+        required: true
+        type: choice
+        options:
+          - theme
+          - plugin
+      names:
+        description: 'Space-separated package slugs to migrate (e.g. "akismet hello-dolly").'
+        required: true
+        type: string
+
+concurrency:
+  group: migrate-by-name-pipeline
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: read
+      contents: read
+    steps:
+      - name: registry login
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: pull image
+        run: docker pull ghcr.io/trywpm/wp-to-wpm:latest
+
+      - name: run migration
+        env:
+          INPUT_NAMES: ${{ inputs.names }}
+        run: |
+          docker run --rm \
+            -e CI=true \
+            -e CONCURRENCY=2 \
+            -e WPM_TOKEN=${{ secrets.WPM_TOKEN }} \
+            -e PACKAGE_TYPE=${{ inputs.type }} \
+            -e NAMES="${INPUT_NAMES}" \
+            -e NEW_RELIC_LICENSE_KEY=${{ secrets.NEW_RELIC_LICENSE_KEY }} \
+            ghcr.io/trywpm/wp-to-wpm:latest migrate-by-name

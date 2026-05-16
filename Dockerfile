@@ -33,11 +33,13 @@ COPY entrypoint/update.sh /usr/local/bin/update
 COPY entrypoint/migrate.sh /usr/local/bin/migrate
 COPY entrypoint/revalidate.sh /usr/local/bin/revalidate
 COPY entrypoint/backfill-migrate.sh /usr/local/bin/backfill-migrate
+COPY entrypoint/migrate-by-name.sh /usr/local/bin/migrate-by-name
 
 RUN chmod +x /usr/local/bin/update
 RUN chmod +x /usr/local/bin/migrate
 RUN chmod +x /usr/local/bin/revalidate
 RUN chmod +x /usr/local/bin/backfill-migrate
+RUN chmod +x /usr/local/bin/migrate-by-name
 
 USER loki
 
