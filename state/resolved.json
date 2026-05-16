@@ -1,4 +1,4 @@
 {
-  "plugins": ["amp", "gutenberg"],
+  "plugins": ["amp", "gutenberg", "stream"],
   "themes": []
 }
