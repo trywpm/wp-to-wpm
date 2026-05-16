@@ -9,7 +9,7 @@ wpm is a modern package manager for WordPress that provides an alternative distr
 ## 🗂️ Repository Structure
 
 - **`themes.json`** - Contains all theme names that have been successfully migrated from WordPress.org SVN to WPM
-- **`plugins.json`** - Contains all plugin names that have been successfully migrated from WordPress.org SVN to WPM  
+- **`plugins.json`** - Contains all plugin names that have been successfully migrated from WordPress.org SVN to WPM
 - **`conflicts.json`** - Lists themes and plugins with conflicting names that cannot be automatically published (authors can manually request publication under the original name)
 
 ## 🚀 How to Request Migration
@@ -42,12 +42,15 @@ If you are the author of a plugin or theme that has been migrated to wpm and you
 ## 📝 Migration Guidelines
 
 ### Automatic Migration Criteria
+
 - Plugin/theme must exist on WordPress.org
 - Must have a clean history (no security issues)
 - No naming conflicts with existing wpm packages
 
 ### Name Conflicts
+
 When a plugin or theme name conflicts with an existing WPM package:
+
 - The item is added to `conflicts.json`
 - Original authors can request manual review for name reservation
 - Alternative naming may be suggested
@@ -55,6 +58,7 @@ When a plugin or theme name conflicts with an existing WPM package:
 ## 🔧 For Maintainers
 
 ### Processing Migration Requests
+
 1. Verify the plugin/theme exists on WordPress.org
 2. Check for naming conflicts
 3. Run migration scripts (if available)
@@ -62,6 +66,7 @@ When a plugin or theme name conflicts with an existing WPM package:
 5. Merge the pull request
 
 ### Processing Removal Requests
+
 1. Verify ownership claims
 2. Remove from wpm registry
 3. Update JSON files
@@ -76,7 +81,8 @@ When a plugin or theme name conflicts with an existing WPM package:
 ## 🤝 Contributing
 
 We welcome contributions from the WordPress community! Whether you're:
+
 - Requesting migration of your own packages
-- Helping migrate popular community packages  
+- Helping migrate popular community packages
 - Improving documentation
 - Reporting issues
