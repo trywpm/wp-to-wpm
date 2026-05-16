@@ -57,7 +57,6 @@ jobs:
 
       - name: commit refreshed state
         run: |
-          git pull origin main
           git add themes.json plugins.json conflicts.json closed-themes.json closed-plugins.json
           if git diff --cached --quiet; then
             echo "no changes to commit"
@@ -78,13 +77,13 @@ jobs:
       - name: push
         run: |
           for attempt in 1 2 3 4 5; do
-            if ! git pull --rebase origin main; then
+            if ! git pull --rebase "$REPO_URL" main; then
               git rebase --abort 2>/dev/null || true
               echo "::warning::pull --rebase failed on attempt $attempt"
               sleep $((attempt * 2))
               continue
             fi
-            if git push origin main; then
+            if git push "$REPO_URL" main; then
               echo "push succeeded on attempt $attempt"
               exit 0
             fi
@@ -93,6 +92,8 @@ jobs:
           done
           echo "::error::failed to push after 5 attempts"
           exit 1
+        env:
+          REPO_URL: 'https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git'
 
       - name: backfill migrate plugins
         run: |
