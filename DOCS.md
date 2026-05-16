@@ -93,10 +93,11 @@ The Go services, the shell wrappers, the workflow definitions, the Cloudflare wo
 │       ├── build.yml          # builds + pushes the Docker image
 │       ├── migrate.yml        # the 15-min migration tick
 │       └── update.yml         # the 12-h update + optional daily revalidate
-├── migrate.sh                 # wraps migrate-wpm inside the container
-├── update.sh                  # wraps update-wpm
-├── revalidate.sh              # wraps revalidate-wpm
-├── backfill-migrate.sh        # wraps migrate-wpm for the post-update pass
+├── entrypoint/
+│   ├── migrate.sh             # wraps migrate-wpm inside the container
+│   ├── update.sh              # wraps update-wpm
+│   ├── revalidate.sh          # wraps revalidate-wpm
+│   └── backfill-migrate.sh    # wraps migrate-wpm for the post-update pass
 ├── Dockerfile                 # multi-stage: go build → alpine + svn + wpm
 ├── worker.ts                  # Cloudflare Worker scheduler
 ├── wrangler.json              # Worker config (crons, KV binding)
@@ -314,14 +315,14 @@ Permanent closures are never touched. That is the only invariant `revalidate` is
 
 ## 7. Shell wrappers
 
-Each Go binary has a thin shell wrapper alongside it. The wrappers handle the wpm CLI login, mask the token in GitHub Actions logs, and pass through environment variables that the workflows set on `docker run`.
+Each Go binary has a thin shell wrapper under `entrypoint/`. The wrappers handle the wpm CLI login, mask the token in GitHub Actions logs, and pass through environment variables that the workflows set on `docker run`. The Dockerfile installs each wrapper into `/usr/local/bin/` under its short name (without the `.sh` suffix), so workflows invoke them by name.
 
-| Wrapper                                    | Binary it invokes | Env in                                     | What it does                                                                                                                   |
-| ------------------------------------------ | ----------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
-| `migrate.sh` → `migrate`                   | `migrate-wpm`     | `PACKAGE_TYPE`, `WPM_TOKEN`, `CONCURRENCY` | Logs into wpm, then runs migrate-wpm with the type and concurrency from the env.                                               |
-| `update.sh` → `update`                     | `update-wpm`      | (none)                                     | Plain wrapper. No token needed since update does not talk to wpm.                                                              |
-| `revalidate.sh` → `revalidate`             | `revalidate-wpm`  | (none)                                     | Plain wrapper.                                                                                                                 |
-| `backfill-migrate.sh` → `backfill-migrate` | `migrate-wpm`     | `PACKAGE_TYPE`, `WPM_TOKEN`, `CONCURRENCY` | Logs in, then xargs each slug from `pending-backfill-${TYPE}s.txt` to migrate-wpm. Skips cleanly if the pending file is empty. |
+| Wrapper | Installed as | Binary it invokes | Env in | What it does |
+| --- | --- | --- | --- | --- |
+| `entrypoint/migrate.sh` | `migrate` | `migrate-wpm` | `PACKAGE_TYPE`, `WPM_TOKEN`, `CONCURRENCY` | Logs into wpm, then runs migrate-wpm with the type and concurrency from the env. |
+| `entrypoint/update.sh` | `update` | `update-wpm` | (none) | Plain wrapper. No token needed since update does not talk to wpm. |
+| `entrypoint/revalidate.sh` | `revalidate` | `revalidate-wpm` | (none) | Plain wrapper. |
+| `entrypoint/backfill-migrate.sh` | `backfill-migrate` | `migrate-wpm` | `PACKAGE_TYPE`, `WPM_TOKEN`, `CONCURRENCY` | Logs in, then xargs each slug from `pending-backfill-${TYPE}s.txt` to migrate-wpm. Skips cleanly if the pending file is empty. |
 
 `migrate.sh` and `backfill-migrate.sh` both call `wpm auth login --token "$WPM_TOKEN"` first, prefixed by `echo "::add-mask::"` so the token never appears in Actions logs.
 

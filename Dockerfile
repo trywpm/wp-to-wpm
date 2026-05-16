@@ -29,10 +29,10 @@ COPY --from=builder /usr/src/app/wpm-update /usr/local/bin/update-wpm
 COPY --from=builder /usr/src/app/wpm-migrate /usr/local/bin/migrate-wpm
 COPY --from=builder /usr/src/app/wpm-revalidate /usr/local/bin/revalidate-wpm
 
-COPY update.sh /usr/local/bin/update
-COPY migrate.sh /usr/local/bin/migrate
-COPY revalidate.sh /usr/local/bin/revalidate
-COPY backfill-migrate.sh /usr/local/bin/backfill-migrate
+COPY entrypoint/update.sh /usr/local/bin/update
+COPY entrypoint/migrate.sh /usr/local/bin/migrate
+COPY entrypoint/revalidate.sh /usr/local/bin/revalidate
+COPY entrypoint/backfill-migrate.sh /usr/local/bin/backfill-migrate
 
 RUN chmod +x /usr/local/bin/update
 RUN chmod +x /usr/local/bin/migrate
