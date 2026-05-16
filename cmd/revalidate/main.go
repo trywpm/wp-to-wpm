@@ -6,8 +6,8 @@ import (
 	"wpm-migration/pkg/store"
 )
 
-// recheck-closures prunes non-permanent entries from closed-themes.json and
-// closed-plugins.json. The next `update` run will re-fetch every removed
+// recheck-closures prunes non-permanent entries from state/closed-themes.json
+// and state/closed-plugins.json. The next `update` run will re-fetch every removed
 // slug from wp.org and re-add it only if the closure is still in effect.
 // Entries that wp.org has since reversed drop out of the list and become
 // eligible for migration again.

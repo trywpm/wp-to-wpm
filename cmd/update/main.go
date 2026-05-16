@@ -49,11 +49,11 @@ func main() {
 
 	oldThemesList, err := store.GetThemes()
 	if err != nil {
-		logger.Fatal().Err(err).Msg("Failed to snapshot existing themes.json; aborting before backfill diff can over-trigger")
+		logger.Fatal().Err(err).Msg("Failed to snapshot existing state/themes.json; aborting before backfill diff can over-trigger")
 	}
 	oldPluginsList, err := store.GetPlugins()
 	if err != nil {
-		logger.Fatal().Err(err).Msg("Failed to snapshot existing plugins.json; aborting before backfill diff can over-trigger")
+		logger.Fatal().Err(err).Msg("Failed to snapshot existing state/plugins.json; aborting before backfill diff can over-trigger")
 	}
 	oldThemes := make(map[string]struct{}, len(oldThemesList))
 	for _, t := range oldThemesList {
@@ -117,7 +117,7 @@ func main() {
 
 	resolved, err := store.GetResolved()
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to read resolved.json; treating as empty")
+		logger.Warn().Err(err).Msg("Failed to read state/resolved.json; treating as empty")
 	}
 
 	resolvedThemes := make(map[string]struct{}, len(resolved.Themes))
@@ -127,7 +127,7 @@ func main() {
 	resolvedPlugins := make(map[string]struct{}, len(resolved.Plugins))
 	for _, p := range resolved.Plugins {
 		if _, dup := resolvedThemes[p]; dup {
-			logger.Fatal().Str("slug", p).Msg("resolved.json lists slug under both themes and plugins")
+			logger.Fatal().Str("slug", p).Msg("state/resolved.json lists slug under both themes and plugins")
 		}
 		resolvedPlugins[p] = struct{}{}
 	}
@@ -155,13 +155,13 @@ func main() {
 	slices.Sort(conflicts)
 
 	if err := store.SetThemes(themesList); err != nil {
-		logger.Fatal().Err(err).Msg("Failed to write themes.json")
+		logger.Fatal().Err(err).Msg("Failed to write state/themes.json")
 	}
 	if err := store.SetPlugins(pluginsList); err != nil {
-		logger.Fatal().Err(err).Msg("Failed to write plugins.json")
+		logger.Fatal().Err(err).Msg("Failed to write state/plugins.json")
 	}
 	if err := store.SetConflicts(conflicts); err != nil {
-		logger.Fatal().Err(err).Msg("Failed to write conflicts.json")
+		logger.Fatal().Err(err).Msg("Failed to write state/conflicts.json")
 	}
 
 	logger.Info().
@@ -172,11 +172,11 @@ func main() {
 
 	closedThemes, err := store.GetClosedThemes()
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to read closed-themes.json; starting from empty")
+		logger.Warn().Err(err).Msg("Failed to read state/closed-themes.json; starting from empty")
 	}
 	closedPlugins, err := store.GetClosedPlugins()
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to read closed-plugins.json; starting from empty")
+		logger.Warn().Err(err).Msg("Failed to read state/closed-plugins.json; starting from empty")
 	}
 
 	existingClosedThemes := len(closedThemes)
@@ -325,10 +325,10 @@ func main() {
 		Msg("Package metadata fetched")
 
 	if err := store.SetClosedThemes(closedThemes); err != nil {
-		logger.Fatal().Err(err).Msg("Failed to write closed-themes.json")
+		logger.Fatal().Err(err).Msg("Failed to write state/closed-themes.json")
 	}
 	if err := store.SetClosedPlugins(closedPlugins); err != nil {
-		logger.Fatal().Err(err).Msg("Failed to write closed-plugins.json")
+		logger.Fatal().Err(err).Msg("Failed to write state/closed-plugins.json")
 	}
 
 	logger.Info().

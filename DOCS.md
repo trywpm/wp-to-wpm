@@ -106,14 +106,15 @@ The Go services, the shell wrappers, the workflow definitions, the Cloudflare wo
 ├── package.json
 ├── go.mod / go.sum
 │
-├── themes.json                # canonical theme allowlist
-├── plugins.json               # canonical plugin allowlist
-├── conflicts.json             # slugs that exist as both theme & plugin
-├── resolved.json              # human assignments for conflicts
-├── closed-themes.json         # closed/withdrawn themes (skip list)
-├── closed-plugins.json        # closed/withdrawn plugins (skip list)
-├── .theme_last_rev            # SVN rev pointer for the theme stream
-└── .plugin_last_rev           # SVN rev pointer for the plugin stream
+└── state/
+    ├── themes.json            # canonical theme allowlist
+    ├── plugins.json           # canonical plugin allowlist
+    ├── conflicts.json         # slugs that exist as both theme & plugin
+    ├── resolved.json          # human assignments for conflicts
+    ├── closed-themes.json     # closed/withdrawn themes (skip list)
+    ├── closed-plugins.json    # closed/withdrawn plugins (skip list)
+    ├── theme_last_rev         # SVN rev pointer for the theme stream
+    └── plugin_last_rev        # SVN rev pointer for the plugin stream
 ```
 
 ## 3. Data files (state)
@@ -124,14 +125,14 @@ State falls into two groups. The first describes the catalog: allowlists, confli
 
 | File                  | Owner               | Shape                                       | Purpose                                      |
 | --------------------- | ------------------- | ------------------------------------------- | -------------------------------------------- |
-| `themes.json`         | update              | sorted `["slug", ...]`                      | Active theme allowlist                       |
-| `plugins.json`        | update              | sorted `["slug", ...]`                      | Active plugin allowlist                      |
-| `conflicts.json`      | update              | sorted `["slug", ...]`                      | Slugs colliding between themes & plugins     |
-| `resolved.json`       | human               | `{"themes": [...], "plugins": [...]}`       | Manual conflict assignments                  |
-| `closed-themes.json`  | update + revalidate | `{"slug": "permanent\|temporary\|unknown"}` | Themes wp.org reports as closed              |
-| `closed-plugins.json` | update + revalidate | `{"slug": "permanent\|temporary\|unknown"}` | Plugins wp.org reports as closed             |
-| `.theme_last_rev`     | migrate             | bare integer                                | Last fully-processed SVN revision for themes |
-| `.plugin_last_rev`    | migrate             | bare integer                                | Same, for plugins                            |
+| `state/themes.json` | update | sorted `["slug", ...]` | Active theme allowlist |
+| `state/plugins.json` | update | sorted `["slug", ...]` | Active plugin allowlist |
+| `state/conflicts.json` | update | sorted `["slug", ...]` | Slugs colliding between themes & plugins |
+| `state/resolved.json` | human | `{"themes": [...], "plugins": [...]}` | Manual conflict assignments |
+| `state/closed-themes.json` | update + revalidate | `{"slug": "permanent\|temporary\|unknown"}` | Themes wp.org reports as closed |
+| `state/closed-plugins.json` | update + revalidate | `{"slug": "permanent\|temporary\|unknown"}` | Plugins wp.org reports as closed |
+| `state/theme_last_rev` | migrate | bare integer | Last fully-processed SVN revision for themes |
+| `state/plugin_last_rev` | migrate | bare integer | Same, for plugins |
 
 The second group is scratch state, only used inside a single workflow run and never committed: `pending-backfill-plugins.txt` and `pending-backfill-themes.txt` (the handoff from `update` to `backfill-migrate` within the same job), and `worker-types.d.ts` (regenerated each time you run `wrangler types`).
 
@@ -194,7 +195,7 @@ The 15-minute heartbeat. Runs as a matrix over `{theme, plugin}`, with the two m
 
 The two matrix jobs both push to `main` at roughly the same time, so push contention is the obvious concern. A retry loop handles it; see the concurrency section.
 
-Commit messages embed the rev range, so `git log -- .plugin_last_rev` is a complete audit trail:
+Commit messages embed the rev range, so `git log -- state/plugin_last_rev` is a complete audit trail:
 
 ```
 migrate(plugin): advance svn rev 3000000..3000150
@@ -247,7 +248,7 @@ For each package the binary follows this pipeline:
 
 ```mermaid
 flowchart TD
-    P([package]) --> C1{in closed-*.json?}
+    P([package]) --> C1{in state/closed-*.json?}
     C1 -- yes --> S1[/skip: reason=closed/]
     C1 -- no --> C2{in whitelist?}
     C2 -- no --> S2[/skip: reason=not-whitelisted/]
@@ -282,13 +283,13 @@ The catalog refresher. Once every 12 hours it asks wp.org which plugins and them
 
 Flow:
 
-1. Snapshot `themes.json` and `plugins.json` as they are right now (needed for the diff later).
+1. Snapshot `state/themes.json` and `state/plugins.json` as they are right now (needed for the diff later).
 2. In parallel, `svn list` the plugin and theme SVN roots to get the full canonical catalogs.
-3. Compute conflicts (slugs that exist in both) and apply `resolved.json` overrides.
-4. Write the refreshed `themes.json`, `plugins.json`, and `conflicts.json`.
-5. Load the existing `closed-*.json` files.
+3. Compute conflicts (slugs that exist in both) and apply `state/resolved.json` overrides.
+4. Write the refreshed `state/themes.json`, `state/plugins.json`, and `state/conflicts.json`.
+5. Load the existing `state/closed-*.json` files.
 6. In parallel, hit the wp.org metadata API for every slug not already marked closed.
-7. Classify each response and write the refreshed `closed-*.json` files.
+7. Classify each response and write the refreshed `state/closed-*.json` files.
 8. Compute the backfill diff (new slugs that are not closed) and write `pending-backfill-*.txt`.
 
 The plugin classification rules (themes only ever get `ClosureUnknown` because wp.org's themes API does not distinguish):
@@ -304,12 +305,12 @@ Three safety caps protect against catastrophic scenarios:
 | Trigger                                                    | Behavior                                                                                                                         |
 | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | Either SVN listing returns fewer than 1000 entries         | Fatal. Refuse to overwrite the allowlists. Protects against upstream HTML/format breakage silently wiping the data.              |
-| `themes.json` or `plugins.json` is unreadable or corrupted | Fatal on read. An empty snapshot would otherwise make every slug look new and explode the backfill list.                         |
+| `state/themes.json` or `state/plugins.json` is unreadable or corrupted | Fatal on read. An empty snapshot would otherwise make every slug look new and explode the backfill list. |
 | Backfill diff exceeds 200 entries per type                 | Log an error, clear the pending file, write empty. The workflow then repeats the same check with `wc -l` as belt-and-suspenders. |
 
 ### 6.3 `cmd/revalidate` (`revalidate-wpm`)
 
-A small binary with one job: open `closed-themes.json` and `closed-plugins.json`, delete every entry whose value is not `ClosurePermanent`, and write them back. It runs once a day (only when `update.yml` is invoked with `revalidate=true`), and the `update` step that follows in the same workflow re-fetches wp.org and re-marks anything that is still actually closed.
+A small binary with one job: open `state/closed-themes.json` and `state/closed-plugins.json`, delete every entry whose value is not `ClosurePermanent`, and write them back. It runs once a day (only when `update.yml` is invoked with `revalidate=true`), and the `update` step that follows in the same workflow re-fetches wp.org and re-marks anything that is still actually closed.
 
 Permanent closures are never touched. That is the only invariant `revalidate` is responsible for upholding.
 
@@ -382,7 +383,7 @@ The system is built so that everything fails loudly, recovers automatically wher
 | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
 | `.{type}_last_rev` lost or set to 0            | migrate refuses to run with an explicit error                                                        | Operator seeds the file from `svn info \| grep Revision`                 |
 | Long SVN log range (catch-up after a big gap)  | migrate refuses if more than 1000 packages would be processed                                        | Operator advances `.{type}_last_rev` in chunks                           |
-| `themes.json` / `plugins.json` corrupted       | `logger.Fatal()` on read                                                                             | Restore from git and re-run                                              |
+| `state/themes.json` / `state/plugins.json` corrupted | `logger.Fatal()` on read | Restore from git and re-run |
 | Upstream SVN listing format breaks             | update refuses if the catalog returns fewer than 1000 entries                                        | Investigate manually; existing state is left untouched                   |
 | Suspiciously large backfill diff               | Go-side 200-entry cap + workflow-side `wc -l` check                                                  | Operator decides whether the spike is legitimate                         |
 | Truncated SVN response mid-stream              | `cmd.Output()` buffers the whole response before parsing, so `xml.Unmarshal` never sees partial data | Next tick retries automatically                                          |
@@ -426,7 +427,7 @@ The workflows commit with structured subjects and bodies. The migrate commits en
 | update              | `update: refresh whitelists and closure status`     | `themes=N plugins=M conflicts=K closed-themes=A closed-plugins=B` |
 | update (revalidate) | `update: revalidate closures, refresh whitelists`   | same body shape                                                   |
 
-Useful queries: `git log --grep "^migrate(plugin)"`, `git log --grep "revalidate closures"`, `git log -p -- closed-plugins.json`.
+Useful queries: `git log --grep "^migrate(plugin)"`, `git log --grep "revalidate closures"`, `git log -p -- state/closed-plugins.json`.
 
 ## 12. Secrets and config
 
@@ -474,6 +475,6 @@ Tags that are already in the registry are skipped automatically thanks to the `p
 
 ### 13.3 Clearing a wrong closure
 
-If a package is wrongly marked as closed (or you suspect wp.org has reopened it since the last revalidation), edit the corresponding `closed-{plugins,themes}.json` and remove the slug. The next `update` run hits wp.org for it. If it is actually still closed, the entry gets re-added with whatever closure state wp.org now reports. If it is actually open it stays out of the file and becomes eligible for migration again on the next 15-minute tick.
+If a package is wrongly marked as closed (or you suspect wp.org has reopened it since the last revalidation), edit the corresponding `state/closed-{plugins,themes}.json` and remove the slug. The next `update` run hits wp.org for it. If it is actually still closed, the entry gets re-added with whatever closure state wp.org now reports. If it is actually open it stays out of the file and becomes eligible for migration again on the next 15-minute tick.
 
 For non-permanent closures no manual action is needed. `revalidate-wpm` clears them automatically every day at 00:00 UTC, and the `update` step right after re-marks whichever ones are still closed.

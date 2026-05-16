@@ -17,16 +17,16 @@ const (
 	filePerm = 0644
 
 	// data files.
-	Themes        StoreFile = "themes.json"
-	Plugins       StoreFile = "plugins.json"
-	Resolved      StoreFile = "resolved.json"
-	Conflicts     StoreFile = "conflicts.json"
-	ClosedThemes  StoreFile = "closed-themes.json"
-	ClosedPlugins StoreFile = "closed-plugins.json"
+	Themes        StoreFile = "state/themes.json"
+	Plugins       StoreFile = "state/plugins.json"
+	Resolved      StoreFile = "state/resolved.json"
+	Conflicts     StoreFile = "state/conflicts.json"
+	ClosedThemes  StoreFile = "state/closed-themes.json"
+	ClosedPlugins StoreFile = "state/closed-plugins.json"
 
 	// svn state files.
-	ThemeSvnRepoRev  StoreFile = ".theme_last_rev"
-	PluginSvnRepoRev StoreFile = ".plugin_last_rev"
+	ThemeSvnRepoRev  StoreFile = "state/theme_last_rev"
+	PluginSvnRepoRev StoreFile = "state/plugin_last_rev"
 )
 
 func (sf StoreFile) Path() string {
@@ -227,7 +227,7 @@ func setData(file StoreFile, data any) error {
 	})
 }
 
-// GetPlugins returns the data from plugins.json
+// GetPlugins returns the data from state/plugins.json
 func GetPlugins() ([]string, error) {
 	var plugins []string
 	if err := getData(Plugins, &plugins); err != nil {
@@ -236,12 +236,12 @@ func GetPlugins() ([]string, error) {
 	return plugins, nil
 }
 
-// SetPlugins writes the given plugins list to plugins.json
+// SetPlugins writes the given plugins list to state/plugins.json
 func SetPlugins(plugins []string) error {
 	return setData(Plugins, plugins)
 }
 
-// GetThemes returns the data from themes.json
+// GetThemes returns the data from state/themes.json
 func GetThemes() ([]string, error) {
 	var themes []string
 	if err := getData(Themes, &themes); err != nil {
@@ -250,12 +250,12 @@ func GetThemes() ([]string, error) {
 	return themes, nil
 }
 
-// SetThemes writes the given themes list to themes.json
+// SetThemes writes the given themes list to state/themes.json
 func SetThemes(themes []string) error {
 	return setData(Themes, themes)
 }
 
-// GetResolved returns the data from resolved.json
+// GetResolved returns the data from state/resolved.json
 func GetResolved() (ResolvedConfig, error) {
 	var resolved ResolvedConfig
 	if err := getData(Resolved, &resolved); err != nil {
@@ -264,12 +264,12 @@ func GetResolved() (ResolvedConfig, error) {
 	return resolved, nil
 }
 
-// SetResolved writes the given resolved config to resolved.json
+// SetResolved writes the given resolved config to state/resolved.json
 func SetResolved(resolved ResolvedConfig) error {
 	return setData(Resolved, resolved)
 }
 
-// GetConflicts returns the data from conflicts.json
+// GetConflicts returns the data from state/conflicts.json
 func GetConflicts() ([]string, error) {
 	var conflicts []string
 	if err := getData(Conflicts, &conflicts); err != nil {
@@ -278,12 +278,12 @@ func GetConflicts() ([]string, error) {
 	return conflicts, nil
 }
 
-// SetConflicts writes the given conflicts list to conflicts.json
+// SetConflicts writes the given conflicts list to state/conflicts.json
 func SetConflicts(conflicts []string) error {
 	return setData(Conflicts, conflicts)
 }
 
-// GetClosedThemes returns the data from closed-themes.json
+// GetClosedThemes returns the data from state/closed-themes.json
 func GetClosedThemes() (map[string]PackageClosure, error) {
 	var closedThemes map[string]PackageClosure
 	err := getData(ClosedThemes, &closedThemes)
@@ -296,12 +296,12 @@ func GetClosedThemes() (map[string]PackageClosure, error) {
 	return closedThemes, nil
 }
 
-// SetClosedThemes writes the given closed themes map to closed-themes.json
+// SetClosedThemes writes the given closed themes map to state/closed-themes.json
 func SetClosedThemes(closedThemes map[string]PackageClosure) error {
 	return setData(ClosedThemes, closedThemes)
 }
 
-// GetClosedPlugins returns the data from closed-plugins.json
+// GetClosedPlugins returns the data from state/closed-plugins.json
 func GetClosedPlugins() (map[string]PackageClosure, error) {
 	var closedPlugins map[string]PackageClosure
 	err := getData(ClosedPlugins, &closedPlugins)
@@ -314,7 +314,7 @@ func GetClosedPlugins() (map[string]PackageClosure, error) {
 	return closedPlugins, nil
 }
 
-// SetClosedPlugins writes the given closed plugins map to closed-plugins.json
+// SetClosedPlugins writes the given closed plugins map to state/closed-plugins.json
 func SetClosedPlugins(closedPlugins map[string]PackageClosure) error {
 	return setData(ClosedPlugins, closedPlugins)
 }
