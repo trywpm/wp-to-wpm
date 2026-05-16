@@ -35931,6 +35931,7 @@
   "single-post-search-result": "permanent",
   "single-postpage-widget": "temporary",
   "single-random-post": "temporary",
+  "single-random-post-with-text": "permanent",
   "single-side-timeline-display": "temporary",
   "single-sign-on": "permanent",
   "single-sign-on-client": "temporary",
