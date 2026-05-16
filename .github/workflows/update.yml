@@ -75,8 +75,22 @@ jobs:
 
       - name: push
         run: |
-          git pull --rebase origin main || true
-          git push origin main
+          for attempt in 1 2 3 4 5; do
+            if ! git pull --rebase origin main; then
+              git rebase --abort 2>/dev/null || true
+              echo "::warning::pull --rebase failed on attempt $attempt"
+              sleep $((attempt * 2))
+              continue
+            fi
+            if git push origin main; then
+              echo "push succeeded on attempt $attempt"
+              exit 0
+            fi
+            echo "::warning::push failed on attempt $attempt"
+            sleep $((attempt * 2))
+          done
+          echo "::error::failed to push after 5 attempts"
+          exit 1
 
       - name: backfill migrate plugins
         run: |
