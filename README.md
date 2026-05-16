@@ -1,88 +1,36 @@
-# wp to wpm
+# wp-to-wpm
 
-This repository contains information and scripts to migrate WordPress plugins and themes from the official WordPress.org SVN repository to wpm (package manager and registry for wp ecosystem).
+Continuously mirrors WordPress.org plugins and themes from their canonical Subversion repositories into the [wpm](https://wpm.so) package registry.
 
-## 📋 Overview
+Every plugin and theme on wp.org becomes a wpm package. Every tagged release in its SVN tree becomes a published version of that package. The mirror is append-only and runs unattended.
 
-wpm is a modern package manager for WordPress that provides an alternative distribution method for WordPress plugins and themes. This repository serves as the central hub for tracking which WordPress.org packages have been migrated to wpm and managing the migration process.
+## How migration happens
 
-## 🗂️ Repository Structure
+Packages are discovered automatically. A scheduled job watches the wp.org SVN repositories for new revisions and publishes each new tag to wpm as soon as it lands upstream. There is no manual step for a typical release. If your plugin or theme is active on wp.org, you do not need to do anything; your next tagged release will be picked up within minutes.
 
-- **`themes.json`** - Contains all theme names that have been successfully migrated from WordPress.org SVN to WPM
-- **`plugins.json`** - Contains all plugin names that have been successfully migrated from WordPress.org SVN to WPM
-- **`conflicts.json`** - Lists themes and plugins with conflicting names that cannot be automatically published (authors can manually request publication under the original name)
+The catalog of eligible packages is refreshed twice a day directly from wp.org, so newly-published plugins and themes are added automatically.
 
-## 🚀 How to Request Migration
+## Requesting a specific package
 
-### For Plugin/Theme Authors
+If a package is on wp.org but is not appearing on wpm and you would like it added, please [open an issue](../../issues/new) with:
 
-If your WordPress plugin or theme exists on WordPress.org but hasn't been migrated to WPM yet, you can request migration by:
+- The plugin or theme slug (the name as it appears in the wp.org URL).
+- A short note on why it should be migrated.
 
-1. **Fork this repository**
-2. **Create a new branch** for your request
-3. **Add your plugin/theme name** to the appropriate JSON file:
-   - Add to `plugins.json` for plugins
-   - Add to `themes.json` for themes
-4. **Submit a Pull Request** with:
-   - Clear title indicating the plugin/theme name
-   - Description explaining why you want it migrated
+A maintainer will look at it and add it manually. Common reasons a package is not yet in wpm:
 
-### For Community Members
+- It has not had a tagged release in a long time, so the automatic discovery has not seen it.
+- It was previously marked closed on wp.org and our cached classification is out of date.
+- Its slug conflicts with another package and needs human resolution.
 
-Community members can also submit migration requests for popular plugins/themes that aren't yet available on wpm by following the same process above.
+## Requesting removal
 
-## 🛑 Removal Requests
+If you are the author of a plugin or theme that has been published to wpm and you would like it removed, [open an issue](../../issues/new). A short explanation helps but is not required.
 
-If you are the author of a plugin or theme that has been migrated to wpm and you want it removed:
+## Naming conflicts
 
-1. **Open an Issue** in this repository
-2. **Explain the reason** for removal (optional but helpful)
-3. A maintainer will review and process the removal request
+Some plugin and theme slugs clash with each other on wp.org (the same name is used for both a plugin and a theme). Those entries are tracked in `state/conflicts.json` and excluded from automatic migration. If you are the author of one side of a conflict and want your package published under the original name, open an issue.
 
-## 📝 Migration Guidelines
+## Documentation
 
-### Automatic Migration Criteria
-
-- Plugin/theme must exist on WordPress.org
-- Must have a clean history (no security issues)
-- No naming conflicts with existing wpm packages
-
-### Name Conflicts
-
-When a plugin or theme name conflicts with an existing WPM package:
-
-- The item is added to `conflicts.json`
-- Original authors can request manual review for name reservation
-- Alternative naming may be suggested
-
-## 🔧 For Maintainers
-
-### Processing Migration Requests
-
-1. Verify the plugin/theme exists on WordPress.org
-2. Check for naming conflicts
-3. Run migration scripts (if available)
-4. Update appropriate JSON file
-5. Merge the pull request
-
-### Processing Removal Requests
-
-1. Verify ownership claims
-2. Remove from wpm registry
-3. Update JSON files
-4. Close the issue with confirmation
-
-## 📊 Statistics
-
-- **Themes migrated**: ~10000+ themes
-- **Plugins migrated**: ~35000+ plugins
-- **Conflicts identified**: Check `conflicts.json` for current count
-
-## 🤝 Contributing
-
-We welcome contributions from the WordPress community! Whether you're:
-
-- Requesting migration of your own packages
-- Helping migrate popular community packages
-- Improving documentation
-- Reporting issues
+Full architecture and operational documentation lives in [DOCS.md](./DOCS.md).
