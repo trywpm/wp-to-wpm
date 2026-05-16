@@ -95,17 +95,21 @@ jobs:
       - name: backfill migrate plugins
         run: |
           docker run --rm \
+            -e CI=true \
             -e CONCURRENCY=2 \
             -e WPM_TOKEN=${{ secrets.WPM_TOKEN }} \
             -e PACKAGE_TYPE=plugin \
+            -e NEW_RELIC_LICENSE_KEY=${{ secrets.NEW_RELIC_LICENSE_KEY }} \
             -v ${{ github.workspace }}:/code \
             ghcr.io/trywpm/wp-to-wpm:latest backfill-migrate
 
       - name: backfill migrate themes
         run: |
           docker run --rm \
+            -e CI=true \
             -e CONCURRENCY=2 \
             -e WPM_TOKEN=${{ secrets.WPM_TOKEN }} \
             -e PACKAGE_TYPE=theme \
+            -e NEW_RELIC_LICENSE_KEY=${{ secrets.NEW_RELIC_LICENSE_KEY }} \
             -v ${{ github.workspace }}:/code \
             ghcr.io/trywpm/wp-to-wpm:latest backfill-migrate
