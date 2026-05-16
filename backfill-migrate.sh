@@ -4,6 +4,11 @@ set -e
 
 echo "::add-mask::${WPM_TOKEN}"
 
+echo "::group::version info"
+echo "wpm version: $(wpm --version)"
+echo "svn version: $(svn --version --quiet)"
+echo "::endgroup::"
+
 echo "::group::wpm login"
 wpm auth login --token ${WPM_TOKEN}
 echo "::endgroup::"
