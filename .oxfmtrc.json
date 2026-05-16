@@ -1,0 +1,27 @@
+{
+  "tabWidth": 2,
+  "printWidth": 100,
+  "singleQuote": true,
+  "insertFinalNewline": true,
+  "ignorePatterns": [
+    "**/.git/**",
+    "**/dist/**",
+    "**/build/**",
+    "**/.wrangler/**",
+    "**/node_modules/**"
+  ],
+  "overrides": [
+    {
+      "files": ["*.md"],
+      "options": {
+        "printWidth": 80
+      }
+    },
+    {
+      "files": ["*.json", "*.jsonc", "package.json"],
+      "options": {
+        "trailingComma": "none"
+      }
+    }
+  ]
+}

@@ -1,2 +1,5 @@
-migrator-activity.log
 .temp
+node_modules
+worker-types.d.ts
+pending-backfill-themes.txt
+pending-backfill-plugins.txt
