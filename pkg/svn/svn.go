@@ -4,50 +4,22 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
-	"errors"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
+
 	"wpm-migration/pkg/store"
 	"wpm-migration/pkg/unsafeconv"
 	"wpm-migration/pkg/validate"
-
-	"golang.org/x/net/html"
 )
 
 const (
 	themesSvnRepo  = "https://themes.svn.wordpress.org"
 	pluginsSvnRepo = "https://plugins.svn.wordpress.org"
-)
-
-var httpClient = &http.Client{
-	Timeout: 60 * time.Second,
-	Transport: &http.Transport{
-		MaxIdleConns:          16,
-		MaxIdleConnsPerHost:   8,
-		MaxConnsPerHost:       16,
-		IdleConnTimeout:       90 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-	},
-}
-
-var (
-	ulBytes     = []byte("ul")
-	hrefBytes   = []byte("href")
-	parentBytes = []byte("../")
 )
 
 func List(ctx context.Context, pkgType store.PackageType) (map[string]struct{}, error) {
@@ -101,82 +73,59 @@ func ListTags(ctx context.Context, pkgType store.PackageType, slug string) (map[
 	}
 }
 
+type svnListEntry struct {
+	Name string `xml:"name"`
+	Kind string `xml:"kind,attr"`
+}
+
+type svnListResult struct {
+	Entries []svnListEntry `xml:"list>entry"`
+}
+
 func list(ctx context.Context, svnRepo string, isValid func([]byte) bool) (map[string]struct{}, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, svnRepo, nil)
+	cmd := exec.CommandContext(ctx, "svn", "list", "--xml", "--non-interactive", svnRepo)
+	cmd.Env = append(os.Environ(), "LC_ALL=", "LC_MESSAGES=C")
+
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch data from %s: %w", svnRepo, err)
-	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
-
-	list := make(map[string]struct{})
-
-	// if tags don't exist, maybe it's a new package with no tags yet.
-	if resp.StatusCode == http.StatusNotFound {
-		return list, nil
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to fetch repo %s, status code: %d", svnRepo, resp.StatusCode)
-	}
-	z := html.NewTokenizer(resp.Body)
-
-	ulDepth := 0
-
-	for {
-		switch z.Next() {
-		case html.ErrorToken:
-			err := z.Err()
-			if errors.Is(err, io.EOF) {
-				return list, nil
-			}
-			return nil, fmt.Errorf("error tokenizing html from %s: %w", svnRepo, err)
-
-		case html.StartTagToken:
-			name, hasAttr := z.TagName()
-			if bytes.Equal(name, ulBytes) {
-				ulDepth++
-			}
-
-			// If we are not inside a <ul> list, ignore all tags
-			if ulDepth == 0 {
-				continue
-			}
-
-			if !hasAttr || len(name) != 1 || name[0] != 'a' {
-				continue
-			}
-
-			for {
-				k, v, more := z.TagAttr()
-				if bytes.Equal(k, hrefBytes) {
-					if len(v) > 1 && v[len(v)-1] == '/' && !bytes.Equal(v, parentBytes) {
-						slug := v[:len(v)-1]
-						if isValid == nil || isValid(slug) {
-							list[string(slug)] = struct{}{}
-						}
-					}
-					break
-				}
-				if !more {
-					break
-				}
-			}
-
-		case html.EndTagToken:
-			name, _ := z.TagName()
-			if bytes.Equal(name, ulBytes) && ulDepth > 0 {
-				ulDepth--
-			}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
+
+		errMsg := stderrBuf.String()
+		if strings.Contains(errMsg, "non-existent") {
+			return map[string]struct{}{}, nil
+		}
+
+		return nil, fmt.Errorf("svn list failed for %s: %w\nstderr: %s", svnRepo, err, strings.TrimSpace(errMsg))
 	}
+
+	var result svnListResult
+	if err := xml.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse svn list xml from %s: %w", svnRepo, err)
+	}
+
+	listMap := make(map[string]struct{}, len(result.Entries))
+	for _, entry := range result.Entries {
+		if entry.Kind != "dir" {
+			continue
+		}
+
+		if entry.Name == "" || entry.Name == "." || entry.Name == ".." {
+			continue
+		}
+
+		if isValid != nil && !isValid(unsafeconv.StringToBytes(entry.Name)) {
+			continue
+		}
+
+		listMap[entry.Name] = struct{}{}
+	}
+
+	return listMap, nil
 }
 
 type SvnLogEntry struct {
@@ -186,6 +135,10 @@ type SvnLogEntry struct {
 
 type SvnPath struct {
 	Path string `xml:",chardata"`
+}
+
+type svnLogResult struct {
+	Entries []SvnLogEntry `xml:"logentry"`
 }
 
 func GetUpdatedPackages(ctx context.Context, pkgType store.PackageType, startRev int) ([]string, int, error) {
@@ -211,80 +164,50 @@ func GetUpdatedPackages(ctx context.Context, pkgType store.PackageType, startRev
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
 
-	stdout, err := cmd.StdoutPipe()
+	out, err := cmd.Output()
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to create stdout pipe: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		return nil, 0, fmt.Errorf("failed to start svn command: %w", err)
-	}
-
-	drainAndWait := sync.OnceValue(func() error {
-		_, _ = io.Copy(io.Discard, stdout)
-		return cmd.Wait()
-	})
-	defer drainAndWait()
-
-	packageSet := make(map[string]struct{})
-	newHeadRev := 0
-
-	decoder := xml.NewDecoder(stdout)
-	for {
-		t, err := decoder.Token()
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if ctx.Err() != nil {
-				return nil, 0, ctx.Err()
-			}
-			return nil, 0, fmt.Errorf("error parsing XML stream: %w", err)
-		}
-
-		// Look for <logentry> tags
-		switch se := t.(type) {
-		case xml.StartElement:
-			if se.Name.Local == "logentry" {
-				var entry SvnLogEntry
-				if err := decoder.DecodeElement(&entry, &se); err != nil {
-					if ctx.Err() != nil {
-						return nil, 0, ctx.Err()
-					}
-					return nil, 0, fmt.Errorf("failed to decode svn log entry: %w", err)
-				}
-
-				rev, err := strconv.Atoi(entry.Revision)
-				if err != nil {
-					return nil, 0, fmt.Errorf("failed to parse revision %q: %w", entry.Revision, err)
-				}
-
-				if rev > newHeadRev {
-					newHeadRev = rev
-				}
-
-				for _, p := range entry.Paths {
-					parts := strings.Split(strings.Trim(p.Path, "/"), "/")
-					if len(parts) > 1 {
-						packageSet[parts[0]] = struct{}{}
-					}
-				}
-			}
-		}
-	}
-
-	if err := drainAndWait(); err != nil {
 		if ctx.Err() != nil {
 			return nil, 0, ctx.Err()
 		}
 
 		errMsg := stderrBuf.String()
-
 		if strings.Contains(errMsg, "E160006") {
 			return []string{}, startRev - 1, nil
 		}
 
-		return nil, 0, fmt.Errorf("svn log failed: %w\nstderr: %s", err, errMsg)
+		return nil, 0, fmt.Errorf("svn log failed: %w\nstderr: %s", err, strings.TrimSpace(errMsg))
+	}
+
+	var result svnLogResult
+	if err := xml.Unmarshal(out, &result); err != nil {
+		return nil, 0, fmt.Errorf("failed to parse svn log xml: %w", err)
+	}
+
+	packageSet := make(map[string]struct{})
+	newHeadRev := 0
+	for _, entry := range result.Entries {
+		rev, err := strconv.Atoi(entry.Revision)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to parse revision %q: %w", entry.Revision, err)
+		}
+
+		if rev > newHeadRev {
+			newHeadRev = rev
+		}
+
+		for _, p := range entry.Paths {
+			parts := strings.Split(strings.Trim(p.Path, "/"), "/")
+			if len(parts) <= 1 {
+				continue
+			}
+
+			slug := parts[0]
+			if slug == "" || slug == "." || slug == ".." {
+				continue
+			}
+
+			packageSet[slug] = struct{}{}
+		}
 	}
 
 	if newHeadRev == 0 {
