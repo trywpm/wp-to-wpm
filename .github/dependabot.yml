@@ -5,6 +5,8 @@ updates:
     schedule:
       interval: weekly
       day: saturday
+    cooldown:
+      default-days: 7
     labels:
       - 'go'
       - 'dependencies'
@@ -14,6 +16,8 @@ updates:
     schedule:
       day: saturday
       interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       actions:
         patterns:
@@ -30,6 +34,8 @@ updates:
     schedule:
       day: saturday
       interval: 'weekly'
+    cooldown:
+      default-days: 7
     labels:
       - 'docker'
       - 'dependencies'
