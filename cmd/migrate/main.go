@@ -18,13 +18,13 @@ import (
 	"time"
 	"wpm-migration/pkg/store"
 	"wpm-migration/pkg/svn"
-	"wpm-migration/pkg/version"
 	"wpm-migration/pkg/wporg"
 
 	"github.com/newrelic/go-agent/v3/integrations/logcontext-v2/zerologWriter"
 	"github.com/newrelic/go-agent/v3/newrelic"
 	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
+	"go.wpm.so/cli/pkg/version"
 	"golang.org/x/sync/errgroup"
 )
 
