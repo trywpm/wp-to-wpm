@@ -31,7 +31,7 @@ jobs:
       - name: registry login
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
-          username: ${{ github.actor }}
+          username: trywpm
           password: ${{ secrets.DOCKER_TOKEN }}
 
       - name: pull image
