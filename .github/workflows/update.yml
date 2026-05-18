@@ -30,12 +30,11 @@ jobs:
       - name: registry login
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
-          registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.DOCKER_TOKEN }}
 
       - name: pull image
-        run: docker pull ghcr.io/trywpm/wp-to-wpm:latest
+        run: docker pull trywpm/wp-to-wpm:latest
 
       - name: setup git user
         run: |
@@ -47,13 +46,13 @@ jobs:
         run: |
           docker run --rm \
             -v ${{ github.workspace }}:/code \
-            ghcr.io/trywpm/wp-to-wpm:latest revalidate
+            trywpm/wp-to-wpm:latest revalidate
 
       - name: run update
         run: |
           docker run --rm \
             -v ${{ github.workspace }}:/code \
-            ghcr.io/trywpm/wp-to-wpm:latest update
+            trywpm/wp-to-wpm:latest update
 
       - name: commit refreshed state
         run: |
@@ -104,7 +103,7 @@ jobs:
             -e PACKAGE_TYPE=plugin \
             -e NEW_RELIC_LICENSE_KEY=${{ secrets.NEW_RELIC_LICENSE_KEY }} \
             -v ${{ github.workspace }}:/code \
-            ghcr.io/trywpm/wp-to-wpm:latest backfill-migrate
+            trywpm/wp-to-wpm:latest backfill-migrate
 
       - name: backfill migrate themes
         run: |
@@ -115,4 +114,4 @@ jobs:
             -e PACKAGE_TYPE=theme \
             -e NEW_RELIC_LICENSE_KEY=${{ secrets.NEW_RELIC_LICENSE_KEY }} \
             -v ${{ github.workspace }}:/code \
-            ghcr.io/trywpm/wp-to-wpm:latest backfill-migrate
+            trywpm/wp-to-wpm:latest backfill-migrate

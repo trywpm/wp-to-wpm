@@ -123,16 +123,16 @@ All persistent state lives in the repo as JSON or plain-text files. Every write 
 
 State falls into two groups. The first describes the catalog: allowlists, conflicts, closures. These are committed back to `main` after every workflow that touches them.
 
-| File                  | Owner               | Shape                                       | Purpose                                      |
-| --------------------- | ------------------- | ------------------------------------------- | -------------------------------------------- |
-| `state/themes.json` | update | sorted `["slug", ...]` | Active theme allowlist |
-| `state/plugins.json` | update | sorted `["slug", ...]` | Active plugin allowlist |
-| `state/conflicts.json` | update | sorted `["slug", ...]` | Slugs colliding between themes & plugins |
-| `state/resolved.json` | human | `{"themes": [...], "plugins": [...]}` | Manual conflict assignments |
-| `state/closed-themes.json` | update + revalidate | `{"slug": "permanent\|temporary\|unknown"}` | Themes wp.org reports as closed |
-| `state/closed-plugins.json` | update + revalidate | `{"slug": "permanent\|temporary\|unknown"}` | Plugins wp.org reports as closed |
-| `state/theme_last_rev` | migrate | bare integer | Last fully-processed SVN revision for themes |
-| `state/plugin_last_rev` | migrate | bare integer | Same, for plugins |
+| File                        | Owner               | Shape                                       | Purpose                                      |
+| --------------------------- | ------------------- | ------------------------------------------- | -------------------------------------------- |
+| `state/themes.json`         | update              | sorted `["slug", ...]`                      | Active theme allowlist                       |
+| `state/plugins.json`        | update              | sorted `["slug", ...]`                      | Active plugin allowlist                      |
+| `state/conflicts.json`      | update              | sorted `["slug", ...]`                      | Slugs colliding between themes & plugins     |
+| `state/resolved.json`       | human               | `{"themes": [...], "plugins": [...]}`       | Manual conflict assignments                  |
+| `state/closed-themes.json`  | update + revalidate | `{"slug": "permanent\|temporary\|unknown"}` | Themes wp.org reports as closed              |
+| `state/closed-plugins.json` | update + revalidate | `{"slug": "permanent\|temporary\|unknown"}` | Plugins wp.org reports as closed             |
+| `state/theme_last_rev`      | migrate             | bare integer                                | Last fully-processed SVN revision for themes |
+| `state/plugin_last_rev`     | migrate             | bare integer                                | Same, for plugins                            |
 
 The second group is scratch state, only used inside a single workflow run and never committed: `pending-backfill-plugins.txt` and `pending-backfill-themes.txt` (the handoff from `update` to `backfill-migrate` within the same job), and `worker-types.d.ts` (regenerated each time you run `wrangler types`).
 
@@ -187,7 +187,7 @@ All three workflows are triggered by `workflow_dispatch` only. There is no `on: 
 
 ### 5.1 `build.yml`
 
-Builds the multi-arch Docker image and pushes it to `ghcr.io/trywpm/wp-to-wpm:latest`. Run manually after code changes. Does not touch repository state.
+Builds the multi-arch Docker image and pushes it to `trywpm/wp-to-wpm:latest`. Run manually after code changes. Does not touch repository state.
 
 ### 5.2 `migrate.yml`
 
@@ -302,11 +302,11 @@ The plugin classification rules (themes only ever get `ClosureUnknown` because w
 
 Three safety caps protect against catastrophic scenarios:
 
-| Trigger                                                    | Behavior                                                                                                                         |
-| ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| Either SVN listing returns fewer than 1000 entries         | Fatal. Refuse to overwrite the allowlists. Protects against upstream HTML/format breakage silently wiping the data.              |
-| `state/themes.json` or `state/plugins.json` is unreadable or corrupted | Fatal on read. An empty snapshot would otherwise make every slug look new and explode the backfill list. |
-| Backfill diff exceeds 200 entries per type                 | Log an error, clear the pending file, write empty. The workflow then repeats the same check with `wc -l` as belt-and-suspenders. |
+| Trigger                                                                | Behavior                                                                                                                         |
+| ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| Either SVN listing returns fewer than 1000 entries                     | Fatal. Refuse to overwrite the allowlists. Protects against upstream HTML/format breakage silently wiping the data.              |
+| `state/themes.json` or `state/plugins.json` is unreadable or corrupted | Fatal on read. An empty snapshot would otherwise make every slug look new and explode the backfill list.                         |
+| Backfill diff exceeds 200 entries per type                             | Log an error, clear the pending file, write empty. The workflow then repeats the same check with `wc -l` as belt-and-suspenders. |
 
 ### 6.3 `cmd/revalidate` (`revalidate-wpm`)
 
@@ -318,12 +318,12 @@ Permanent closures are never touched. That is the only invariant `revalidate` is
 
 Each Go binary has a thin shell wrapper under `entrypoint/`. The wrappers handle the wpm CLI login, mask the token in GitHub Actions logs, and pass through environment variables that the workflows set on `docker run`. The Dockerfile installs each wrapper into `/usr/local/bin/` under its short name (without the `.sh` suffix), so workflows invoke them by name.
 
-| Wrapper | Installed as | Binary it invokes | Env in | What it does |
-| --- | --- | --- | --- | --- |
-| `entrypoint/migrate.sh` | `migrate` | `migrate-wpm` | `PACKAGE_TYPE`, `WPM_TOKEN`, `CONCURRENCY` | Logs into wpm, then runs migrate-wpm with the type and concurrency from the env. |
-| `entrypoint/update.sh` | `update` | `update-wpm` | (none) | Plain wrapper. No token needed since update does not talk to wpm. |
-| `entrypoint/revalidate.sh` | `revalidate` | `revalidate-wpm` | (none) | Plain wrapper. |
-| `entrypoint/backfill-migrate.sh` | `backfill-migrate` | `migrate-wpm` | `PACKAGE_TYPE`, `WPM_TOKEN`, `CONCURRENCY` | Logs in, then xargs each slug from `pending-backfill-${TYPE}s.txt` to migrate-wpm. Skips cleanly if the pending file is empty. |
+| Wrapper                          | Installed as       | Binary it invokes | Env in                                     | What it does                                                                                                                   |
+| -------------------------------- | ------------------ | ----------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| `entrypoint/migrate.sh`          | `migrate`          | `migrate-wpm`     | `PACKAGE_TYPE`, `WPM_TOKEN`, `CONCURRENCY` | Logs into wpm, then runs migrate-wpm with the type and concurrency from the env.                                               |
+| `entrypoint/update.sh`           | `update`           | `update-wpm`      | (none)                                     | Plain wrapper. No token needed since update does not talk to wpm.                                                              |
+| `entrypoint/revalidate.sh`       | `revalidate`       | `revalidate-wpm`  | (none)                                     | Plain wrapper.                                                                                                                 |
+| `entrypoint/backfill-migrate.sh` | `backfill-migrate` | `migrate-wpm`     | `PACKAGE_TYPE`, `WPM_TOKEN`, `CONCURRENCY` | Logs in, then xargs each slug from `pending-backfill-${TYPE}s.txt` to migrate-wpm. Skips cleanly if the pending file is empty. |
 
 `migrate.sh` and `backfill-migrate.sh` both call `wpm auth login --token "$WPM_TOKEN"` first, prefixed by `echo "::add-mask::"` so the token never appears in Actions logs.
 
@@ -379,22 +379,22 @@ With a maximum of 30 seconds of cumulative backoff, push races between the matri
 
 The system is built so that everything fails loudly, recovers automatically where possible, and refuses to do anything catastrophic. The table lists the failure modes the system actively handles.
 
-| Failure                                        | What stops it                                                                                        | Recovery                                                                 |
-| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| `.{type}_last_rev` lost or set to 0            | migrate refuses to run with an explicit error                                                        | Operator seeds the file from `svn info \| grep Revision`                 |
-| Long SVN log range (catch-up after a big gap)  | migrate refuses if more than 1000 packages would be processed                                        | Operator advances `.{type}_last_rev` in chunks                           |
-| `state/themes.json` / `state/plugins.json` corrupted | `logger.Fatal()` on read | Restore from git and re-run |
-| Upstream SVN listing format breaks             | update refuses if the catalog returns fewer than 1000 entries                                        | Investigate manually; existing state is left untouched                   |
-| Suspiciously large backfill diff               | Go-side 200-entry cap + workflow-side `wc -l` check                                                  | Operator decides whether the spike is legitimate                         |
-| Truncated SVN response mid-stream              | `cmd.Output()` buffers the whole response before parsing, so `xml.Unmarshal` never sees partial data | Next tick retries automatically                                          |
-| wp.org API rate limit                          | `pkg/wporg` retries three times with exponential backoff                                             | Next tick retries automatically                                          |
-| Per-tag publish timeout                        | `--tag-timeout` (8 minutes) kills the subprocess                                                     | Other tags keep going; the failed tag is simply absent from the registry |
-| Per-package error                              | Logged and skipped                                                                                   | The next migrate tick picks the package up again via the SVN log         |
-| Workflow run fails after dispatch              | KV marker may still hold "today done"                                                                | At most 24 h of revalidate staleness; next day's run recovers            |
-| CF Worker cron drop                            | KV marker either expires or was never written                                                        | Next tick attempts                                                       |
-| `GITHUB_TOKEN` / `WPM_TOKEN` expired           | All dispatches or publishes fail loudly                                                              | Operator rotates the token                                               |
-| Brand-new plugin with no `/tags/` directory    | `svn list` returns "non-existent", treated as empty                                                  | Migrate logs `Package up-to-date`; no error                              |
-| Two SVN tags that normalise to the same semver | Both attempt to publish; the registry rejects the second                                             | Self-heals on the next run via the `publishedVersions` check             |
+| Failure                                              | What stops it                                                                                        | Recovery                                                                 |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `.{type}_last_rev` lost or set to 0                  | migrate refuses to run with an explicit error                                                        | Operator seeds the file from `svn info \| grep Revision`                 |
+| Long SVN log range (catch-up after a big gap)        | migrate refuses if more than 1000 packages would be processed                                        | Operator advances `.{type}_last_rev` in chunks                           |
+| `state/themes.json` / `state/plugins.json` corrupted | `logger.Fatal()` on read                                                                             | Restore from git and re-run                                              |
+| Upstream SVN listing format breaks                   | update refuses if the catalog returns fewer than 1000 entries                                        | Investigate manually; existing state is left untouched                   |
+| Suspiciously large backfill diff                     | Go-side 200-entry cap + workflow-side `wc -l` check                                                  | Operator decides whether the spike is legitimate                         |
+| Truncated SVN response mid-stream                    | `cmd.Output()` buffers the whole response before parsing, so `xml.Unmarshal` never sees partial data | Next tick retries automatically                                          |
+| wp.org API rate limit                                | `pkg/wporg` retries three times with exponential backoff                                             | Next tick retries automatically                                          |
+| Per-tag publish timeout                              | `--tag-timeout` (8 minutes) kills the subprocess                                                     | Other tags keep going; the failed tag is simply absent from the registry |
+| Per-package error                                    | Logged and skipped                                                                                   | The next migrate tick picks the package up again via the SVN log         |
+| Workflow run fails after dispatch                    | KV marker may still hold "today done"                                                                | At most 24 h of revalidate staleness; next day's run recovers            |
+| CF Worker cron drop                                  | KV marker either expires or was never written                                                        | Next tick attempts                                                       |
+| `GITHUB_TOKEN` / `WPM_TOKEN` expired                 | All dispatches or publishes fail loudly                                                              | Operator rotates the token                                               |
+| Brand-new plugin with no `/tags/` directory          | `svn list` returns "non-existent", treated as empty                                                  | Migrate logs `Package up-to-date`; no error                              |
+| Two SVN tags that normalise to the same semver       | Both attempt to publish; the registry rejects the second                                             | Self-heals on the next run via the `publishedVersions` check             |
 
 ## 11. Observability
 
@@ -467,7 +467,7 @@ docker run --rm \
   -e WPM_TOKEN=<token> \
   -e NEW_RELIC_LICENSE_KEY=<key> \
   -v "$PWD:/code" \
-  ghcr.io/trywpm/wp-to-wpm:latest \
+  trywpm/wp-to-wpm:latest \
   sh -c 'wpm auth login --token $WPM_TOKEN && migrate-wpm --type plugin foo-plugin bar-plugin'
 ```
 

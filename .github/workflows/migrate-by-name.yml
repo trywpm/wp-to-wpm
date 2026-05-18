@@ -32,12 +32,11 @@ jobs:
       - name: registry login
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
-          registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.DOCKER_TOKEN }}
 
       - name: pull image
-        run: docker pull ghcr.io/trywpm/wp-to-wpm:latest
+        run: docker pull trywpm/wp-to-wpm:latest
 
       - name: run migration
         env:
@@ -50,4 +49,4 @@ jobs:
             -e PACKAGE_TYPE=${{ inputs.type }} \
             -e NAMES="${INPUT_NAMES}" \
             -e NEW_RELIC_LICENSE_KEY=${{ secrets.NEW_RELIC_LICENSE_KEY }} \
-            ghcr.io/trywpm/wp-to-wpm:latest migrate-by-name
+            trywpm/wp-to-wpm:latest migrate-by-name
