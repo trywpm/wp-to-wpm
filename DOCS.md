@@ -1,14 +1,23 @@
 # wp-to-wpm service documentation
 
-This service mirrors WordPress.org plugins and themes from their canonical Subversion repositories into the [wpm](https://wpm.so) package registry. It runs unattended on a schedule, picks up new releases from upstream, and publishes each one as an immutable version on wpm.
+This service mirrors WordPress.org plugins and themes from their canonical
+Subversion repositories into the [wpm](https://wpm.so) package registry. It runs
+unattended on a schedule, picks up new releases from upstream, and publishes
+each one as an immutable version on wpm.
 
-Every plugin and theme on wp.org becomes a wpm package, and every tagged release in its SVN tree becomes a published version of that package. The mirror is append-only: it never deletes, never rewrites, and converges as upstream changes.
+Every plugin and theme on wp.org becomes a wpm package, and every tagged release
+in its SVN tree becomes a published version of that package. The mirror is
+append-only: it never deletes, never rewrites, and converges as upstream
+changes.
 
-The rest of this document explains how the parts fit together, what state they keep, and what to do when something looks wrong.
+The rest of this document explains how the parts fit together, what state they
+keep, and what to do when something looks wrong.
 
 ## 1. Architecture at a glance
 
-A scheduler triggers workflows. The workflows run the binaries inside a container. The binaries talk to upstream wp.org and to the wpm registry. The diagram below shows the major pieces and how data flows between them.
+A scheduler triggers workflows. The workflows run the binaries inside a
+container. The binaries talk to upstream wp.org and to the wpm registry. The
+diagram below shows the major pieces and how data flows between them.
 
 ```mermaid
 flowchart TD
@@ -39,7 +48,11 @@ flowchart TD
     IMG --> REG
 ```
 
-The three runtime workflows (`migrate`, `update`, `build`) share a single concurrency group called `migrate-pipeline`. GitHub Actions will only ever run one of them at a time; anything else waits its turn. This matters because all three read and write the same state files, and serializing them removes a whole class of race conditions without us having to reason about them.
+The three runtime workflows (`migrate`, `update`, `build`) share a single
+concurrency group called `migrate-pipeline`. GitHub Actions will only ever run
+one of them at a time; anything else waits its turn. This matters because all
+three read and write the same state files, and serializing them removes a whole
+class of race conditions without us having to reason about them.
 
 A typical migrate tick, end to end:
 
@@ -72,7 +85,10 @@ sequenceDiagram
 
 ## 2. Repository layout
 
-The Go services, the shell wrappers, the workflow definitions, the Cloudflare worker, and the state files all live in the same repository. Keeping everything in one place makes the audit trail trivial: every state change is just another git commit.
+The Go services, the shell wrappers, the workflow definitions, the Cloudflare
+worker, and the state files all live in the same repository. Keeping everything
+in one place makes the audit trail trivial: every state change is just another
+git commit.
 
 ```
 .
@@ -119,9 +135,14 @@ The Go services, the shell wrappers, the workflow definitions, the Cloudflare wo
 
 ## 3. Data files (state)
 
-All persistent state lives in the repo as JSON or plain-text files. Every write goes through `pkg/store.atomicWrite`, which uses a tmp file plus `fsync` plus rename. A crash mid-write cannot leave the file half-finished; readers see either the old contents or the new ones, never anything in between.
+All persistent state lives in the repo as JSON or plain-text files. Every write
+goes through `pkg/store.atomicWrite`, which uses a tmp file plus `fsync` plus
+rename. A crash mid-write cannot leave the file half-finished; readers see
+either the old contents or the new ones, never anything in between.
 
-State falls into two groups. The first describes the catalog: allowlists, conflicts, closures. These are committed back to `main` after every workflow that touches them.
+State falls into two groups. The first describes the catalog: allowlists,
+conflicts, closures. These are committed back to `main` after every workflow
+that touches them.
 
 | File                        | Owner               | Shape                                       | Purpose                                      |
 | --------------------------- | ------------------- | ------------------------------------------- | -------------------------------------------- |
@@ -134,11 +155,16 @@ State falls into two groups. The first describes the catalog: allowlists, confli
 | `state/theme_last_rev`      | migrate             | bare integer                                | Last fully-processed SVN revision for themes |
 | `state/plugin_last_rev`     | migrate             | bare integer                                | Same, for plugins                            |
 
-The second group is scratch state, only used inside a single workflow run and never committed: `pending-backfill-plugins.txt` and `pending-backfill-themes.txt` (the handoff from `update` to `backfill-migrate` within the same job), and `worker-types.d.ts` (regenerated each time you run `wrangler types`).
+The second group is scratch state, only used inside a single workflow run and
+never committed: `pending-backfill-plugins.txt` and
+`pending-backfill-themes.txt` (the handoff from `update` to `backfill-migrate`
+within the same job), and `worker-types.d.ts` (regenerated each time you run
+`wrangler types`).
 
 ## 4. Cloudflare Worker (`worker.ts`)
 
-The worker is the system's clock. It does not process anything itself; it decides when to wake the workflows up. Two cron schedules are configured:
+The worker is the system's clock. It does not process anything itself; it
+decides when to wake the workflows up. Two cron schedules are configured:
 
 ```jsonc
 // wrangler.json
@@ -150,7 +176,10 @@ The worker is the system's clock. It does not process anything itself; it decide
 
 ### 4.1 Per-tick decision
 
-Each time a cron fires the worker walks a small decision tree before dispatching anything. It needs to make sure it is not stepping on an already-running workflow, and (for the daily update) that it is not re-triggering a revalidation that already happened today.
+Each time a cron fires the worker walks a small decision tree before dispatching
+anything. It needs to make sure it is not stepping on an already-running
+workflow, and (for the daily update) that it is not re-triggering a revalidation
+that already happened today.
 
 | Cron fires     | Worker action                                                                                                                                                                                                                                                                                                                                  |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -177,25 +206,42 @@ flowchart TD
 
 ### 4.2 KV gate
 
-The KV namespace bound as `kv` holds exactly one key: `revalidate:lastDispatch`. Its presence tells the worker that a revalidate dispatch already happened in this 24-hour window. The 23-hour TTL means the key always expires before the next 00:00 slot, so the next day starts with a clean slate even if Cloudflare's cron drifts by a few minutes.
+The KV namespace bound as `kv` holds exactly one key: `revalidate:lastDispatch`.
+Its presence tells the worker that a revalidate dispatch already happened in
+this 24-hour window. The 23-hour TTL means the key always expires before the
+next 00:00 slot, so the next day starts with a clean slate even if Cloudflare's
+cron drifts by a few minutes.
 
-The key is only written after the dispatch HTTP call succeeds. A failed dispatch leaves the key absent and the next tick retries; there is no way for a failed dispatch to falsely mark the day as done.
+The key is only written after the dispatch HTTP call succeeds. A failed dispatch
+leaves the key absent and the next tick retries; there is no way for a failed
+dispatch to falsely mark the day as done.
 
 ## 5. GitHub Actions workflows
 
-All three workflows are triggered by `workflow_dispatch` only. There is no `on: schedule` and no `on: push`. In normal operation the worker is the only thing firing them, but you can also dispatch any of them manually from the GitHub UI and they will behave identically.
+All three workflows are triggered by `workflow_dispatch` only. There is no
+`on: schedule` and no `on: push`. In normal operation the worker is the only
+thing firing them, but you can also dispatch any of them manually from the
+GitHub UI and they will behave identically.
 
 ### 5.1 `build.yml`
 
-Builds the multi-arch Docker image and pushes it to `trywpm/wp-to-wpm:latest`. Run manually after code changes. Does not touch repository state.
+Builds the multi-arch Docker image and pushes it to `trywpm/wp-to-wpm:latest`.
+Run manually after code changes. Does not touch repository state.
 
 ### 5.2 `migrate.yml`
 
-The 15-minute heartbeat. Runs as a matrix over `{theme, plugin}`, with the two matrix jobs running side by side. Each does the same thing for its package type: check out the repo, run `docker run migrate` (which calls `migrate-wpm` for the corresponding type), then commit the advanced `.{type}_last_rev` pointer and push.
+The 15-minute heartbeat. Runs as a matrix over `{theme, plugin}`, with the two
+matrix jobs running side by side. Each does the same thing for its package type:
+check out the repo, run `docker run migrate` (which calls `migrate-wpm` for the
+corresponding type), then commit the advanced `.{type}_last_rev` pointer and
+push.
 
-The two matrix jobs both push to `main` at roughly the same time, so push contention is the obvious concern. A retry loop handles it; see the concurrency section.
+The two matrix jobs both push to `main` at roughly the same time, so push
+contention is the obvious concern. A retry loop handles it; see the concurrency
+section.
 
-Commit messages embed the rev range, so `git log -- state/plugin_last_rev` is a complete audit trail:
+Commit messages embed the rev range, so `git log -- state/plugin_last_rev` is a
+complete audit trail:
 
 ```
 migrate(plugin): advance svn rev 3000000..3000150
@@ -203,7 +249,9 @@ migrate(plugin): advance svn rev 3000000..3000150
 
 ### 5.3 `update.yml`
 
-The 12-hour catalog refresh, plus (at 00:00) the daily closure-list cleanup. Single job, sequential steps. Takes a `revalidate: boolean` input from the worker.
+The 12-hour catalog refresh, plus (at 00:00) the daily closure-list cleanup.
+Single job, sequential steps. Takes a `revalidate: boolean` input from the
+worker.
 
 ```mermaid
 flowchart LR
@@ -220,13 +268,20 @@ flowchart LR
     J --> K[backfill migrate themes]
 ```
 
-`revalidate` and `update` are two steps in the **same job** so they cannot get decoupled. Revalidate prunes some entries from the closure lists; update immediately re-checks wp.org and re-adds whichever entries are still actually closed. Only the final state, after both steps have run, gets committed back to `main`. Externally there is no observable window where the closure list is pruned but not yet repopulated.
+`revalidate` and `update` are two steps in the **same job** so they cannot get
+decoupled. Revalidate prunes some entries from the closure lists; update
+immediately re-checks wp.org and re-adds whichever entries are still actually
+closed. Only the final state, after both steps have run, gets committed back to
+`main`. Externally there is no observable window where the closure list is
+pruned but not yet repopulated.
 
 ## 6. Go binaries
 
 ### 6.1 `cmd/migrate` (`migrate-wpm`)
 
-The workhorse. Given a list of package slugs to process (picked up from `svn log` or passed as CLI arguments), it figures out which tags are new, downloads each one from SVN, and publishes it to the wpm registry.
+The workhorse. Given a list of package slugs to process (picked up from
+`svn log` or passed as CLI arguments), it figures out which tags are new,
+downloads each one from SVN, and publishes it to the wpm registry.
 
 | Flag                | Default           | Purpose                                      |
 | ------------------- | ----------------- | -------------------------------------------- |
@@ -242,7 +297,9 @@ The binary operates in one of two modes depending on whether you pass slugs:
 | `migrate-wpm -t plugin`               | `svn log rev+1..HEAD` | advanced on successful run | `migrate.yml`                           |
 | `migrate-wpm -t plugin slug1 slug2 …` | the args verbatim     | **not** touched            | `backfill-migrate.sh`, manual one-shots |
 
-The CLI-args mode is what makes backfill and manual force-migration safe. You can re-run a slug as many times as you like and the rev pointer never moves, so nothing else gets thrown off.
+The CLI-args mode is what makes backfill and manual force-migration safe. You
+can re-run a slug as many times as you like and the rev pointer never moves, so
+nothing else gets thrown off.
 
 For each package the binary follows this pipeline:
 
@@ -268,7 +325,12 @@ flowchart TD
     Dist -- no --> P2[wpm publish --tag untagged]
 ```
 
-Errors are kept as local as possible. A single tag publish failing produces a `Tag failed step=…` log line and the next tag for the same package keeps going. A whole package failing produces a `Package error` line and the next package keeps going. If the run is interrupted (Ctrl-C, SIGTERM), the binary exits cleanly without advancing the rev pointer, so the next run picks up where this one left off.
+Errors are kept as local as possible. A single tag publish failing produces a
+`Tag failed step=…` log line and the next tag for the same package keeps going.
+A whole package failing produces a `Package error` line and the next package
+keeps going. If the run is interrupted (Ctrl-C, SIGTERM), the binary exits
+cleanly without advancing the rev pointer, so the next run picks up where this
+one left off.
 
 Two safety caps guard against catastrophic scenarios:
 
@@ -279,20 +341,31 @@ Two safety caps guard against catastrophic scenarios:
 
 ### 6.2 `cmd/update` (`update-wpm`)
 
-The catalog refresher. Once every 12 hours it asks wp.org which plugins and themes exist right now, and which of them are closed. It writes that information into the JSON state files and identifies new entries that should be migrated, leaving them in a scratch file for `backfill-migrate` to consume in the next step.
+The catalog refresher. Once every 12 hours it asks wp.org which plugins and
+themes exist right now, and which of them are closed. It writes that information
+into the JSON state files and identifies new entries that should be migrated,
+leaving them in a scratch file for `backfill-migrate` to consume in the next
+step.
 
 Flow:
 
-1. Snapshot `state/themes.json` and `state/plugins.json` as they are right now (needed for the diff later).
-2. In parallel, `svn list` the plugin and theme SVN roots to get the full canonical catalogs.
-3. Compute conflicts (slugs that exist in both) and apply `state/resolved.json` overrides.
-4. Write the refreshed `state/themes.json`, `state/plugins.json`, and `state/conflicts.json`.
+1. Snapshot `state/themes.json` and `state/plugins.json` as they are right now
+   (needed for the diff later).
+2. In parallel, `svn list` the plugin and theme SVN roots to get the full
+   canonical catalogs.
+3. Compute conflicts (slugs that exist in both) and apply `state/resolved.json`
+   overrides.
+4. Write the refreshed `state/themes.json`, `state/plugins.json`, and
+   `state/conflicts.json`.
 5. Load the existing `state/closed-*.json` files.
-6. In parallel, hit the wp.org metadata API for every slug not already marked closed.
+6. In parallel, hit the wp.org metadata API for every slug not already marked
+   closed.
 7. Classify each response and write the refreshed `state/closed-*.json` files.
-8. Compute the backfill diff (new slugs that are not closed) and write `pending-backfill-*.txt`.
+8. Compute the backfill diff (new slugs that are not closed) and write
+   `pending-backfill-*.txt`.
 
-The plugin classification rules (themes only ever get `ClosureUnknown` because wp.org's themes API does not distinguish):
+The plugin classification rules (themes only ever get `ClosureUnknown` because
+wp.org's themes API does not distinguish):
 
 | wp.org `Error` value      | Description match                       | Classification     |
 | ------------------------- | --------------------------------------- | ------------------ |
@@ -310,13 +383,23 @@ Three safety caps protect against catastrophic scenarios:
 
 ### 6.3 `cmd/revalidate` (`revalidate-wpm`)
 
-A small binary with one job: open `state/closed-themes.json` and `state/closed-plugins.json`, delete every entry whose value is not `ClosurePermanent`, and write them back. It runs once a day (only when `update.yml` is invoked with `revalidate=true`), and the `update` step that follows in the same workflow re-fetches wp.org and re-marks anything that is still actually closed.
+A small binary with one job: open `state/closed-themes.json` and
+`state/closed-plugins.json`, delete every entry whose value is not
+`ClosurePermanent`, and write them back. It runs once a day (only when
+`update.yml` is invoked with `revalidate=true`), and the `update` step that
+follows in the same workflow re-fetches wp.org and re-marks anything that is
+still actually closed.
 
-Permanent closures are never touched. That is the only invariant `revalidate` is responsible for upholding.
+Permanent closures are never touched. That is the only invariant `revalidate` is
+responsible for upholding.
 
 ## 7. Shell wrappers
 
-Each Go binary has a thin shell wrapper under `entrypoint/`. The wrappers handle the wpm CLI login, mask the token in GitHub Actions logs, and pass through environment variables that the workflows set on `docker run`. The Dockerfile installs each wrapper into `/usr/local/bin/` under its short name (without the `.sh` suffix), so workflows invoke them by name.
+Each Go binary has a thin shell wrapper under `entrypoint/`. The wrappers handle
+the wpm CLI login, mask the token in GitHub Actions logs, and pass through
+environment variables that the workflows set on `docker run`. The Dockerfile
+installs each wrapper into `/usr/local/bin/` under its short name (without the
+`.sh` suffix), so workflows invoke them by name.
 
 | Wrapper                          | Installed as       | Binary it invokes | Env in                                     | What it does                                                                                                                   |
 | -------------------------------- | ------------------ | ----------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
@@ -325,11 +408,15 @@ Each Go binary has a thin shell wrapper under `entrypoint/`. The wrappers handle
 | `entrypoint/revalidate.sh`       | `revalidate`       | `revalidate-wpm`  | (none)                                     | Plain wrapper.                                                                                                                 |
 | `entrypoint/backfill-migrate.sh` | `backfill-migrate` | `migrate-wpm`     | `PACKAGE_TYPE`, `WPM_TOKEN`, `CONCURRENCY` | Logs in, then xargs each slug from `pending-backfill-${TYPE}s.txt` to migrate-wpm. Skips cleanly if the pending file is empty. |
 
-`migrate.sh` and `backfill-migrate.sh` both call `wpm auth login --token "$WPM_TOKEN"` first, prefixed by `echo "::add-mask::"` so the token never appears in Actions logs.
+`migrate.sh` and `backfill-migrate.sh` both call
+`wpm auth login --token "$WPM_TOKEN"` first, prefixed by `echo "::add-mask::"`
+so the token never appears in Actions logs.
 
 ## 8. Docker image
 
-Multi-stage build. The builder stage compiles the three Go binaries statically. The runtime stage is `alpine` plus `subversion` plus the `wpm` CLI copied from the upstream `trywpm/cli:latest` image.
+Multi-stage build. The builder stage compiles the three Go binaries statically.
+The runtime stage is `alpine` plus `subversion` plus the `wpm` CLI copied from
+the upstream `trywpm/cli:latest` image.
 
 ```
 /usr/local/bin/
@@ -343,7 +430,11 @@ Multi-stage build. The builder stage compiles the three Go binaries statically. 
   └─ backfill-migrate           (shell wrapper)
 ```
 
-The image runs as a non-root user called `loki`. The workdir is `/code`. Workflows mount the runner's checked-out repo there so the binaries read and write the state files in place. `CMD ["/usr/local/bin/migrate"]` is the default entrypoint, but every workflow overrides it by passing a wrapper name to `docker run`.
+The image runs as a non-root user called `loki`. The workdir is `/code`.
+Workflows mount the runner's checked-out repo there so the binaries read and
+write the state files in place. `CMD ["/usr/local/bin/migrate"]` is the default
+entrypoint, but every workflow overrides it by passing a wrapper name to
+`docker run`.
 
 ## 9. Concurrency model
 
@@ -355,15 +446,36 @@ concurrency:
   cancel-in-progress: false
 ```
 
-This means GitHub Actions guarantees that at most one workflow in the `migrate-pipeline` group is `in_progress` at any moment. When something else tries to start it goes into `queued` state. GitHub's policy for queued runs is: if a second one shows up while one is already queued, the older queued run gets cancelled and the newer one waits. The queue never grows beyond one. Active runs are never preempted by newer dispatches.
+This means GitHub Actions guarantees that at most one workflow in the
+`migrate-pipeline` group is `in_progress` at any moment. When something else
+tries to start it goes into `queued` state. GitHub's policy for queued runs is:
+if a second one shows up while one is already queued, the older queued run gets
+cancelled and the newer one waits. The queue never grows beyond one. Active runs
+are never preempted by newer dispatches.
 
-The one race we have to actively prevent is **migrate running while revalidate has pruned closures but update has not re-populated them yet**. If that happened, migrate would see many "closed" packages as newly-eligible and start hammering wp.org and the registry for things that are actually still closed. There are three independent defences against this; any one of them is sufficient on its own:
+The one race we have to actively prevent is **migrate running while revalidate
+has pruned closures but update has not re-populated them yet**. If that
+happened, migrate would see many "closed" packages as newly-eligible and start
+hammering wp.org and the registry for things that are actually still closed.
+There are three independent defences against this; any one of them is sufficient
+on its own:
 
-1. **Step ordering inside the workflow.** Revalidate and update are sequential steps in the _same_ job in `update.yml`. The pruned closure list only ever exists in the runner's workspace between those two steps. The single commit at the end of the job captures only the final refreshed state. There is no moment when `main` has a pruned-but-not-repopulated closure list.
-2. **Worker `hasActiveRun` check.** Before dispatching migrate, the worker queries the GitHub API to see if `update.yml` has any active runs. If it does, the worker does not dispatch.
-3. **The concurrency group.** Even if the worker's check somehow misses (network race, API lag), a dispatched migrate would still queue behind the running update.
+1. **Step ordering inside the workflow.** Revalidate and update are sequential
+   steps in the _same_ job in `update.yml`. The pruned closure list only ever
+   exists in the runner's workspace between those two steps. The single commit
+   at the end of the job captures only the final refreshed state. There is no
+   moment when `main` has a pruned-but-not-repopulated closure list.
+2. **Worker `hasActiveRun` check.** Before dispatching migrate, the worker
+   queries the GitHub API to see if `update.yml` has any active runs. If it
+   does, the worker does not dispatch.
+3. **The concurrency group.** Even if the worker's check somehow misses (network
+   race, API lag), a dispatched migrate would still queue behind the running
+   update.
 
-The other concurrency concern is push contention. The `migrate.yml` matrix runs theme and plugin in parallel; both finish around the same time, both want to push their own `.{type}_last_rev` to `main`. The push step handles this with a retry loop that re-bases up to five times with linear backoff:
+The other concurrency concern is push contention. The `migrate.yml` matrix runs
+theme and plugin in parallel; both finish around the same time, both want to
+push their own `.{type}_last_rev` to `main`. The push step handles this with a
+retry loop that re-bases up to five times with linear backoff:
 
 ```bash
 for attempt in 1 2 3 4 5; do
@@ -373,11 +485,15 @@ for attempt in 1 2 3 4 5; do
 done
 ```
 
-With a maximum of 30 seconds of cumulative backoff, push races between the matrix siblings (or between workflows) resolve cleanly without manual intervention.
+With a maximum of 30 seconds of cumulative backoff, push races between the
+matrix siblings (or between workflows) resolve cleanly without manual
+intervention.
 
 ## 10. Failure modes & safety caps
 
-The system is built so that everything fails loudly, recovers automatically where possible, and refuses to do anything catastrophic. The table lists the failure modes the system actively handles.
+The system is built so that everything fails loudly, recovers automatically
+where possible, and refuses to do anything catastrophic. The table lists the
+failure modes the system actively handles.
 
 | Failure                                              | What stops it                                                                                        | Recovery                                                                 |
 | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
@@ -400,7 +516,9 @@ The system is built so that everything fails loudly, recovers automatically wher
 
 ### 11.1 Log fields
 
-Every Go binary emits structured JSON via zerolog. When `CI=true` is set in the container environment and a `NEW_RELIC_LICENSE_KEY` is present, the logs are also forwarded to New Relic under the application name `wp-to-wpm migrate`.
+Every Go binary emits structured JSON via zerolog. When `CI=true` is set in the
+container environment and a `NEW_RELIC_LICENSE_KEY` is present, the logs are
+also forwarded to New Relic under the application name `wp-to-wpm migrate`.
 
 The fields below are what to query on:
 
@@ -418,7 +536,11 @@ The fields below are what to query on:
 
 ### 11.2 Commit messages
 
-The workflows commit with structured subjects and bodies. The migrate commits encode the rev range they covered. The update commits include current state counts in the body, which doubles as a quick anomaly detector: if today's `closed-plugins` count is dramatically different from yesterday's, something is worth investigating.
+The workflows commit with structured subjects and bodies. The migrate commits
+encode the rev range they covered. The update commits include current state
+counts in the body, which doubles as a quick anomaly detector: if today's
+`closed-plugins` count is dramatically different from yesterday's, something is
+worth investigating.
 
 | Workflow            | Subject                                             | Body                                                              |
 | ------------------- | --------------------------------------------------- | ----------------------------------------------------------------- |
@@ -427,7 +549,9 @@ The workflows commit with structured subjects and bodies. The migrate commits en
 | update              | `update: refresh whitelists and closure status`     | `themes=N plugins=M conflicts=K closed-themes=A closed-plugins=B` |
 | update (revalidate) | `update: revalidate closures, refresh whitelists`   | same body shape                                                   |
 
-Useful queries: `git log --grep "^migrate(plugin)"`, `git log --grep "revalidate closures"`, `git log -p -- state/closed-plugins.json`.
+Useful queries: `git log --grep "^migrate(plugin)"`,
+`git log --grep "revalidate closures"`,
+`git log -p -- state/closed-plugins.json`.
 
 ## 12. Secrets and config
 
@@ -445,21 +569,37 @@ Useful queries: `git log --grep "^migrate(plugin)"`, `git log --grep "revalidate
 | -------------- | ---------------------------------- | -------------------------------------------------------------------------------------- |
 | `GITHUB_TOKEN` | `wrangler secret put GITHUB_TOKEN` | Fine-grained PAT, scoped to **Repository → Actions: Read and write** on this repo only |
 
-The repo owner, name, and branch (`OWNER`, `REPO`, `REF`) are hardcoded as constants in `worker.ts`; they do not change per environment. The KV namespace bound as `kv` holds exactly one key: `revalidate:lastDispatch`, with a 23-hour TTL.
+The repo owner, name, and branch (`OWNER`, `REPO`, `REF`) are hardcoded as
+constants in `worker.ts`; they do not change per environment. The KV namespace
+bound as `kv` holds exactly one key: `revalidate:lastDispatch`, with a 23-hour
+TTL.
 
 ## 13. Operations
 
 ### 13.1 Token rotation
 
-Each token has its own loop. None of them auto-recover. When a token expires the relevant part of the pipeline starts failing loudly and stays failed until you rotate.
+Each token has its own loop. None of them auto-recover. When a token expires the
+relevant part of the pipeline starts failing loudly and stays failed until you
+rotate.
 
-- **Worker `GITHUB_TOKEN`.** Fine-grained PATs have a maximum 1-year lifetime. When it expires `wrangler tail` shows `dispatch … failed: 401`. Rotate with `wrangler secret put GITHUB_TOKEN` after creating a new PAT with the same Actions: Read+Write scope.
-- **`WPM_TOKEN`.** When it expires migrate runs show `Tag failed step=wpm-publish` with `user must be logged in` in stderr. Rotate from the repo's Settings → Secrets and variables → Actions.
-- **`NEW_RELIC_LICENSE_KEY`.** When it expires NR APM stops receiving data; nothing in the workflow itself fails. Rotate from the same Actions secrets page.
+- **Worker `GITHUB_TOKEN`.** Fine-grained PATs have a maximum 1-year lifetime.
+  When it expires `wrangler tail` shows `dispatch … failed: 401`. Rotate with
+  `wrangler secret put GITHUB_TOKEN` after creating a new PAT with the same
+  Actions: Read+Write scope.
+- **`WPM_TOKEN`.** When it expires migrate runs show
+  `Tag failed step=wpm-publish` with `user must be logged in` in stderr. Rotate
+  from the repo's Settings → Secrets and variables → Actions.
+- **`NEW_RELIC_LICENSE_KEY`.** When it expires NR APM stops receiving data;
+  nothing in the workflow itself fails. Rotate from the same Actions secrets
+  page.
 
 ### 13.2 Force-migrating a known slug
 
-Sometimes you need to run migrate against specific packages on demand. For example after fixing a transient upstream issue, or to verify a particular slug end to end. The CLI-args mode of `migrate-wpm` is designed for this. It bypasses the SVN log entirely, does not advance the rev pointer, and still respects the closures and whitelist:
+Sometimes you need to run migrate against specific packages on demand. For
+example after fixing a transient upstream issue, or to verify a particular slug
+end to end. The CLI-args mode of `migrate-wpm` is designed for this. It bypasses
+the SVN log entirely, does not advance the rev pointer, and still respects the
+closures and whitelist:
 
 ```bash
 docker run --rm \
@@ -471,10 +611,18 @@ docker run --rm \
   sh -c 'wpm auth login --token $WPM_TOKEN && migrate-wpm --type plugin foo-plugin bar-plugin'
 ```
 
-Tags that are already in the registry are skipped automatically thanks to the `publishedVersions` check, so re-running on the same slug is idempotent.
+Tags that are already in the registry are skipped automatically thanks to the
+`publishedVersions` check, so re-running on the same slug is idempotent.
 
 ### 13.3 Clearing a wrong closure
 
-If a package is wrongly marked as closed (or you suspect wp.org has reopened it since the last revalidation), edit the corresponding `state/closed-{plugins,themes}.json` and remove the slug. The next `update` run hits wp.org for it. If it is actually still closed, the entry gets re-added with whatever closure state wp.org now reports. If it is actually open it stays out of the file and becomes eligible for migration again on the next 15-minute tick.
+If a package is wrongly marked as closed (or you suspect wp.org has reopened it
+since the last revalidation), edit the corresponding
+`state/closed-{plugins,themes}.json` and remove the slug. The next `update` run
+hits wp.org for it. If it is actually still closed, the entry gets re-added with
+whatever closure state wp.org now reports. If it is actually open it stays out
+of the file and becomes eligible for migration again on the next 15-minute tick.
 
-For non-permanent closures no manual action is needed. `revalidate-wpm` clears them automatically every day at 00:00 UTC, and the `update` step right after re-marks whichever ones are still closed.
+For non-permanent closures no manual action is needed. `revalidate-wpm` clears
+them automatically every day at 00:00 UTC, and the `update` step right after
+re-marks whichever ones are still closed.
