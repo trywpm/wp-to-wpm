@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -20,6 +21,7 @@ import (
 	"wpm-migration/pkg/svn"
 	"wpm-migration/pkg/wporg"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/newrelic/go-agent/v3/integrations/logcontext-v2/zerologWriter"
 	"github.com/newrelic/go-agent/v3/newrelic"
 	"github.com/rs/zerolog"
@@ -256,14 +258,15 @@ func migratePackage(
 	type pendingTag struct {
 		raw        string
 		normalized string
+		semver     *semver.Version
 	}
 
-	// Hold the stable version aside so it is published last. Publishing with no
-	// --tag makes that version latest, so a stable-last order sets latest
-	// correctly without a dist-tag call.
+	// Collect the not-yet-published tags, deduping versions that normalize to
+	// the same semver (publishing the same version twice would fail).
 	tagsToMigrate := make([]pendingTag, 0, len(tags))
 	var stable pendingTag
 	haveStable := false
+	seen := make(map[string]struct{}, len(tags))
 	for tag := range tags {
 		normalized, err := version.Normalize(tag)
 		if err != nil {
@@ -274,14 +277,31 @@ func migratePackage(
 			continue
 		}
 
+		if _, dup := seen[normalized]; dup {
+			continue
+		}
+		seen[normalized] = struct{}{}
+
+		sv, err := semver.StrictNewVersion(normalized)
+		if err != nil {
+			continue
+		}
+
 		if latestNormalized != "" && normalized == latestNormalized {
-			stable = pendingTag{raw: tag, normalized: normalized}
+			stable = pendingTag{raw: tag, normalized: normalized, semver: sv}
 			haveStable = true
 			continue
 		}
 
-		tagsToMigrate = append(tagsToMigrate, pendingTag{raw: tag, normalized: normalized})
+		tagsToMigrate = append(tagsToMigrate, pendingTag{raw: tag, normalized: normalized, semver: sv})
 	}
+
+	// Publish in ascending order so the highest version lands last and becomes
+	// latest. The stable version, if tagged, is published after everything so
+	// it ends up as latest even when it is not the highest tag.
+	sort.Slice(tagsToMigrate, func(i, j int) bool {
+		return tagsToMigrate[i].semver.LessThan(tagsToMigrate[j].semver)
+	})
 	if haveStable {
 		tagsToMigrate = append(tagsToMigrate, stable)
 	}
