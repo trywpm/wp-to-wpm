@@ -57,7 +57,11 @@ func wpmExec(ctx context.Context, cwd string, args ...string) error {
 
 // getPublishedVersions fetches the list of published versions for a given package from the wpm registry.
 func getPublishedVersions(ctx context.Context, registry, slug string) (map[string]struct{}, error) {
-	url := "https://" + registry + "/" + slug
+	base := registry
+	if !strings.Contains(base, "://") {
+		base = "https://" + base
+	}
+	url := base + "/" + slug
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request for %s: %w", url, err)
@@ -95,6 +99,19 @@ func getPublishedVersions(ctx context.Context, registry, slug string) (map[strin
 	return versions, nil
 }
 
+type counters struct {
+	migrated      atomic.Int64
+	upToDate      atomic.Int64
+	skipClosed    atomic.Int64
+	skipWhitelist atomic.Int64
+	skipNoInfo    atomic.Int64
+	errored       atomic.Int64
+	tagsPublished atomic.Int64
+	tagsFailed    atomic.Int64
+	distTagSet    atomic.Int64
+	distTagFailed atomic.Int64
+}
+
 func run(ctx context.Context, o Options, packages []string) error {
 	pkgType := store.PackageType(o.migrationType)
 	if !pkgType.Valid() {
@@ -119,16 +136,7 @@ func run(ctx context.Context, o Options, packages []string) error {
 
 	start := time.Now()
 
-	var (
-		pkgsMigrated  int
-		pkgsUpToDate  int
-		skipClosed    int
-		skipWhitelist int
-		skipNoInfo    int
-		pkgsErrored   int
-		tagsPublished int
-		tagsFailed    int
-	)
+	var c counters
 
 	defer func() {
 		ev := o.logger.Info()
@@ -140,220 +148,278 @@ func run(ctx context.Context, o Options, packages []string) error {
 		ev.
 			Dur("duration", time.Since(start)).
 			Int("packages", len(packages)).
-			Int("migrated", pkgsMigrated).
-			Int("up_to_date", pkgsUpToDate).
-			Int("skipped_closed", skipClosed).
-			Int("skipped_not_whitelisted", skipWhitelist).
-			Int("skipped_no_info", skipNoInfo).
-			Int("errored", pkgsErrored).
-			Int("tags_published", tagsPublished).
-			Int("tags_failed", tagsFailed).
+			Int64("migrated", c.migrated.Load()).
+			Int64("up_to_date", c.upToDate.Load()).
+			Int64("skipped_closed", c.skipClosed.Load()).
+			Int64("skipped_not_whitelisted", c.skipWhitelist.Load()).
+			Int64("skipped_no_info", c.skipNoInfo.Load()).
+			Int64("errored", c.errored.Load()).
+			Int64("tags_published", c.tagsPublished.Load()).
+			Int64("tags_failed", c.tagsFailed.Load()).
+			Int64("dist_tags_set", c.distTagSet.Load()).
+			Int64("dist_tags_failed", c.distTagFailed.Load()).
 			Msg(msg)
 	}()
 
+	// Packages run concurrently. Tags within a package are published
+	// sequentially because the registry locks a per-package object on publish.
+	var eg errgroup.Group
+	eg.SetLimit(o.concurrency)
+
 	for _, pkg := range packages {
 		if ctx.Err() != nil {
+			break
+		}
+
+		pkg := pkg
+		eg.Go(func() error {
+			migratePackage(ctx, o, pkgType, pkg, wpClient, closedPackages, whitelisted, &c)
 			return nil
+		})
+	}
+
+	_ = eg.Wait()
+
+	return nil
+}
+
+func migratePackage(
+	ctx context.Context,
+	o Options,
+	pkgType store.PackageType,
+	pkg string,
+	wpClient *wporg.Client,
+	closedPackages map[string]store.PackageClosure,
+	whitelisted map[string]struct{},
+	c *counters,
+) {
+	pkgLogger := o.logger.With().Str("package", pkg).Logger()
+
+	if _, ok := closedPackages[pkg]; ok {
+		pkgLogger.Info().Str("reason", "closed").Msg("Skipping package")
+		c.skipClosed.Add(1)
+		return
+	}
+
+	if _, ok := whitelisted[pkg]; !ok {
+		pkgLogger.Info().Str("reason", "not-whitelisted").Msg("Skipping package")
+		c.skipWhitelist.Add(1)
+		return
+	}
+
+	info, err := wpClient.FetchPackageInfo(ctx, pkgType, pkg)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+			return
 		}
+		pkgLogger.Error().Err(err).Str("step", "fetch-info").Msg("Package error")
+		c.errored.Add(1)
+		return
+	}
 
-		pkgLogger := o.logger.With().Str("package", pkg).Logger()
+	if info.Error != "" && info.Version == "" {
+		pkgLogger.Info().
+			Str("reason", "no-version-info").
+			Str("api_error", info.Error).
+			Msg("Skipping package")
+		c.skipNoInfo.Add(1)
+		return
+	}
 
-		if _, ok := closedPackages[pkg]; ok {
-			pkgLogger.Info().Str("reason", "closed").Msg("Skipping package")
-			skipClosed++
-			continue
+	publishedVersions, err := getPublishedVersions(ctx, o.registry, pkg)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
 		}
+		pkgLogger.Error().Err(err).Str("step", "fetch-published-versions").Msg("Package error")
+		c.errored.Add(1)
+		return
+	}
 
-		if _, ok := whitelisted[pkg]; !ok {
-			pkgLogger.Info().Str("reason", "not-whitelisted").Msg("Skipping package")
-			skipWhitelist++
-			continue
+	tags, err := svn.ListTags(ctx, pkgType, pkg)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
 		}
+		pkgLogger.Error().Err(err).Str("step", "list-svn-tags").Msg("Package error")
+		c.errored.Add(1)
+		return
+	}
 
-		info, err := wpClient.FetchPackageInfo(ctx, pkgType, pkg)
+	var latestNormalized string
+	if latestRaw := string(info.Version); latestRaw != "" {
+		if n, err := version.Normalize(latestRaw); err == nil {
+			latestNormalized = n
+		}
+	}
+
+	type pendingTag struct {
+		raw        string
+		normalized string
+	}
+
+	// Hold the stable version aside so it is published last. Publishing with no
+	// --tag makes that version latest, so a stable-last order sets latest
+	// correctly without a dist-tag call.
+	tagsToMigrate := make([]pendingTag, 0, len(tags))
+	var stable pendingTag
+	haveStable := false
+	for tag := range tags {
+		normalized, err := version.Normalize(tag)
 		if err != nil {
-			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
-				return nil
-			}
-			pkgLogger.Error().Err(err).Str("step", "fetch-info").Msg("Package error")
-			pkgsErrored++
 			continue
 		}
 
-		if info.Error != "" && info.Version == "" {
-			pkgLogger.Info().
-				Str("reason", "no-version-info").
-				Str("api_error", info.Error).
-				Msg("Skipping package")
-			skipNoInfo++
+		if _, published := publishedVersions[normalized]; published {
 			continue
 		}
 
-		publishedVersions, err := getPublishedVersions(ctx, o.registry, pkg)
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			pkgLogger.Error().Err(err).Str("step", "fetch-published-versions").Msg("Package error")
-			pkgsErrored++
+		if latestNormalized != "" && normalized == latestNormalized {
+			stable = pendingTag{raw: tag, normalized: normalized}
+			haveStable = true
 			continue
 		}
 
-		tags, err := svn.ListTags(ctx, pkgType, pkg)
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			pkgLogger.Error().Err(err).Str("step", "list-svn-tags").Msg("Package error")
-			pkgsErrored++
-			continue
-		}
+		tagsToMigrate = append(tagsToMigrate, pendingTag{raw: tag, normalized: normalized})
+	}
+	if haveStable {
+		tagsToMigrate = append(tagsToMigrate, stable)
+	}
 
-		var latestNormalized string
-		if latestRaw := string(info.Version); latestRaw != "" {
-			if n, err := version.Normalize(latestRaw); err == nil {
-				latestNormalized = n
-			}
-		}
-
-		type pendingTag struct {
-			raw        string
-			normalized string
-		}
-
-		tagsToMigrate := make([]pendingTag, 0, len(tags))
-		for tag := range tags {
-			normalized, err := version.Normalize(tag)
-			if err != nil {
-				continue // Skip tags that can't be normalized as versions
-			}
-
-			if _, published := publishedVersions[normalized]; published {
-				continue
-			}
-
-			tagsToMigrate = append(tagsToMigrate, pendingTag{raw: tag, normalized: normalized})
-		}
-
-		if len(tagsToMigrate) == 0 {
-			pkgLogger.Info().
-				Int("svn_tags", len(tags)).
-				Int("published", len(publishedVersions)).
-				Msg("Package up-to-date")
-			pkgsUpToDate++
-			continue
-		}
-
-		pkgStart := time.Now()
+	if len(tagsToMigrate) == 0 {
 		pkgLogger.Info().
 			Int("svn_tags", len(tags)).
 			Int("published", len(publishedVersions)).
-			Int("to_migrate", len(tagsToMigrate)).
-			Msg("Migrating package")
-
-		var (
-			pkgTagsOK   atomic.Int64
-			pkgTagsFail atomic.Int64
-		)
-
-		var eg errgroup.Group
-		eg.SetLimit(o.concurrency)
-
-		for _, pt := range tagsToMigrate {
-			if ctx.Err() != nil {
-				break
-			}
-
-			pt := pt
-
-			eg.Go(func() error {
-				if ctx.Err() != nil {
-					return nil
-				}
-
-				tagCtx, cancel := context.WithTimeout(ctx, o.tagTimeout)
-				defer cancel()
-
-				tagLogger := pkgLogger.With().
-					Str("tag", pt.raw).
-					Str("version", pt.normalized).
-					Logger()
-
-				tagStart := time.Now()
-				tagLogger.Info().Msg("Migrating tag")
-
-				exportPath, cleanup, err := svn.Export(tagCtx, pkgType, pkg, pt.raw)
-				if err != nil {
-					if ctx.Err() == nil {
-						tagLogger.Error().Err(err).Str("step", "svn-export").Msg("Tag failed")
-						pkgTagsFail.Add(1)
-					}
-					return nil
-				}
-				defer cleanup()
-
-				if err := wpmExec(tagCtx, exportPath,
-					"init", "--existing",
-					"--name", pkg,
-					"--version", pt.normalized,
-					"--type", string(pkgType),
-				); err != nil {
-					if ctx.Err() == nil {
-						tagLogger.Error().Err(err).Str("step", "wpm-init").Msg("Tag failed")
-						pkgTagsFail.Add(1)
-					}
-					return nil
-				}
-
-				distTag := "untagged"
-				if latestNormalized != "" && latestNormalized == pt.normalized {
-					distTag = "latest"
-				}
-
-				if err := wpmExec(tagCtx, exportPath,
-					"--registry", o.registry,
-					"publish",
-					"--access", "public",
-					"--tag", distTag,
-				); err != nil {
-					if ctx.Err() == nil {
-						tagLogger.Error().Err(err).Str("step", "wpm-publish").Msg("Tag failed")
-						pkgTagsFail.Add(1)
-					}
-					return nil
-				}
-
-				tagLogger.Info().
-					Str("dist_tag", distTag).
-					Dur("duration", time.Since(tagStart)).
-					Msg("Tag migrated")
-				pkgTagsOK.Add(1)
-				return nil
-			})
-		}
-
-		_ = eg.Wait()
-
-		ok := pkgTagsOK.Load()
-		fail := pkgTagsFail.Load()
-		tagsPublished += int(ok)
-		tagsFailed += int(fail)
-		if ok > 0 || fail > 0 {
-			pkgsMigrated++
-		}
-
-		if ctx.Err() != nil {
-			return nil
-		}
-
-		pkgLogger.Info().
-			Int64("migrated", ok).
-			Int64("failed", fail).
-			Dur("duration", time.Since(pkgStart)).
-			Msg("Package finished")
+			Msg("Package up-to-date")
+		c.upToDate.Add(1)
+		return
 	}
 
-	return nil
+	pkgStart := time.Now()
+	pkgLogger.Info().
+		Int("svn_tags", len(tags)).
+		Int("published", len(publishedVersions)).
+		Int("to_migrate", len(tagsToMigrate)).
+		Msg("Migrating package")
+
+	var ok, fail int
+	var latest string
+	for _, pt := range tagsToMigrate {
+		if ctx.Err() != nil {
+			break
+		}
+
+		if publishTag(ctx, o, pkgType, pkg, pt.raw, pt.normalized, &pkgLogger) {
+			ok++
+			c.tagsPublished.Add(1)
+			publishedVersions[pt.normalized] = struct{}{}
+			latest = pt.normalized
+		} else if ctx.Err() == nil {
+			fail++
+			c.tagsFailed.Add(1)
+		}
+	}
+
+	if ok > 0 || fail > 0 {
+		c.migrated.Add(1)
+	}
+
+	// A publish leaves latest on the last published version. If the stable
+	// version is published but did not land last, point latest back at it. This
+	// is the only case that spends a dist-tag call.
+	if ctx.Err() == nil && latest != "" && latestNormalized != "" && latest != latestNormalized {
+		if _, published := publishedVersions[latestNormalized]; published {
+			setLatestTag(ctx, o, pkg, latestNormalized, &pkgLogger, c)
+		} else {
+			pkgLogger.Warn().
+				Str("stable", latestNormalized).
+				Str("latest", latest).
+				Msg("Stable version not published; leaving latest unchanged")
+		}
+	}
+
+	if ctx.Err() != nil {
+		return
+	}
+
+	pkgLogger.Info().
+		Int("migrated", ok).
+		Int("failed", fail).
+		Dur("duration", time.Since(pkgStart)).
+		Msg("Package finished")
+}
+
+func publishTag(ctx context.Context, o Options, pkgType store.PackageType, pkg, rawTag, normalized string, pkgLogger *zerolog.Logger) bool {
+	tagCtx, cancel := context.WithTimeout(ctx, o.tagTimeout)
+	defer cancel()
+
+	tagLogger := pkgLogger.With().
+		Str("tag", rawTag).
+		Str("version", normalized).
+		Logger()
+
+	tagStart := time.Now()
+	tagLogger.Info().Msg("Migrating tag")
+
+	exportPath, cleanup, err := svn.Export(tagCtx, pkgType, pkg, rawTag)
+	if err != nil {
+		if ctx.Err() == nil {
+			tagLogger.Error().Err(err).Str("step", "svn-export").Msg("Tag failed")
+		}
+		return false
+	}
+	defer cleanup()
+
+	if err := wpmExec(tagCtx, exportPath,
+		"init", "--existing",
+		"--name", pkg,
+		"--version", normalized,
+		"--type", string(pkgType),
+	); err != nil {
+		if ctx.Err() == nil {
+			tagLogger.Error().Err(err).Str("step", "wpm-init").Msg("Tag failed")
+		}
+		return false
+	}
+
+	if err := wpmExec(tagCtx, exportPath,
+		"--registry", o.registry,
+		"publish",
+		"--access", "public",
+	); err != nil {
+		if ctx.Err() == nil {
+			tagLogger.Error().Err(err).Str("step", "wpm-publish").Msg("Tag failed")
+		}
+		return false
+	}
+
+	tagLogger.Info().
+		Dur("duration", time.Since(tagStart)).
+		Msg("Tag migrated")
+	return true
+}
+
+func setLatestTag(ctx context.Context, o Options, pkg, normalized string, pkgLogger *zerolog.Logger, c *counters) {
+	tagCtx, cancel := context.WithTimeout(ctx, o.tagTimeout)
+	defer cancel()
+
+	if err := wpmExec(tagCtx, ".",
+		"--registry", o.registry,
+		"dist-tag", "add",
+		pkg+"@"+normalized,
+	); err != nil {
+		if ctx.Err() == nil {
+			pkgLogger.Error().Err(err).
+				Str("step", "wpm-dist-tag").
+				Str("version", normalized).
+				Msg("Failed to set latest dist-tag")
+			c.distTagFailed.Add(1)
+		}
+		return
+	}
+
+	pkgLogger.Info().Str("version", normalized).Msg("Set latest dist-tag")
+	c.distTagSet.Add(1)
 }
 
 func main() {
