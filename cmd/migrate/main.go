@@ -81,14 +81,14 @@ func getPublishedVersions(ctx context.Context, registry, slug string) (map[strin
 	}
 
 	var r struct {
-		Versions []string `json:"versions"`
+		Versions map[string]json.RawMessage `json:"versions"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
 		return nil, fmt.Errorf("failed to decode registry response from %s: %w", url, err)
 	}
 
 	versions := make(map[string]struct{}, len(r.Versions))
-	for _, v := range r.Versions {
+	for v := range r.Versions {
 		versions[v] = struct{}{}
 	}
 
