@@ -363,10 +363,10 @@ func migratePackage(
 		if _, published := publishedVersions[latestNormalized]; published {
 			setLatestTag(ctx, o, pkg, latestNormalized, &pkgLogger, c)
 		} else {
-			pkgLogger.Warn().
+			pkgLogger.Info().
 				Str("stable", latestNormalized).
 				Str("latest", latest).
-				Msg("Stable version not published; leaving latest unchanged")
+				Msg("wp.org stable not published (in cooldown or untagged); latest left at last published version")
 		}
 	}
 
@@ -557,7 +557,7 @@ func main() {
 	}
 
 	cmd.Flags().IntVarP(&opts.concurrency, "concurrency", "c", 2, "Number of concurrent migrations")
-	cmd.Flags().DurationVar(&opts.cooldown, "cooldown", 28*time.Hour, "Hold back tags pushed within this window (wp.org 24h release cooldown + safety margin); 0 disables")
+	cmd.Flags().DurationVar(&opts.cooldown, "cooldown", 25*time.Hour, "Hold back tags pushed within this window (wp.org 24h release cooldown + safety margin); 0 disables")
 	cmd.Flags().DurationVar(&opts.tagTimeout, "tag-timeout", 8*time.Minute, "Timeout for migrating a single tag")
 
 	cmd.Flags().StringVarP(&opts.registry, "registry", "r", "registry.wpm.so", "wpm registry url")
