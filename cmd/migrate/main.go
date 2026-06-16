@@ -38,6 +38,7 @@ type Options struct {
 	registry      string
 	migrationType string
 	concurrency   int
+	cooldown      time.Duration
 	tagTimeout    time.Duration
 	logger        *zerolog.Logger
 }
@@ -112,9 +113,10 @@ type counters struct {
 	tagsFailed    atomic.Int64
 	distTagSet    atomic.Int64
 	distTagFailed atomic.Int64
+	deferred      atomic.Int64
 }
 
-func run(ctx context.Context, o Options, packages []string) error {
+func run(ctx context.Context, o Options, packages []string, cutoff time.Time) error {
 	pkgType := store.PackageType(o.migrationType)
 	if !pkgType.Valid() {
 		return fmt.Errorf("invalid migration type: %s", o.migrationType)
@@ -160,6 +162,7 @@ func run(ctx context.Context, o Options, packages []string) error {
 			Int64("tags_failed", c.tagsFailed.Load()).
 			Int64("dist_tags_set", c.distTagSet.Load()).
 			Int64("dist_tags_failed", c.distTagFailed.Load()).
+			Int64("deferred_cooldown", c.deferred.Load()).
 			Msg(msg)
 	}()
 
@@ -175,7 +178,7 @@ func run(ctx context.Context, o Options, packages []string) error {
 
 		pkg := pkg
 		eg.Go(func() error {
-			migratePackage(ctx, o, pkgType, pkg, wpClient, closedPackages, whitelisted, &c)
+			migratePackage(ctx, o, pkgType, pkg, wpClient, closedPackages, whitelisted, &c, cutoff)
 			return nil
 		})
 	}
@@ -194,6 +197,7 @@ func migratePackage(
 	closedPackages map[string]store.PackageClosure,
 	whitelisted map[string]struct{},
 	c *counters,
+	cutoff time.Time,
 ) {
 	pkgLogger := o.logger.With().Str("package", pkg).Logger()
 
@@ -267,7 +271,15 @@ func migratePackage(
 	var stable pendingTag
 	haveStable := false
 	seen := make(map[string]struct{}, len(tags))
-	for tag := range tags {
+	for tag, pushedAt := range tags {
+		// Honor wp.org's release cooldown: a tag pushed within the cooldown
+		// window is not yet the auto-update target on wp.org, so we hold it back
+		// to keep wpm's latest in parity. It is picked up on a later run.
+		if pushedAt.After(cutoff) {
+			c.deferred.Add(1)
+			continue
+		}
+
 		normalized, err := version.Normalize(tag)
 		if err != nil {
 			continue
@@ -477,9 +489,13 @@ func main() {
 				return fmt.Errorf("refusing to scan svn from rev 1: .%s_last_rev is missing or 0. Initialize it to a recent revision, or invoke with explicit slugs to bootstrap", pkgType)
 			}
 
+			// Tags pushed within this window are held back to stay in parity
+			// with wp.org's release cooldown for auto-updates.
+			cutoff := time.Now().Add(-opts.cooldown)
+
 			var headRev int
 			if len(args) == 0 {
-				args, headRev, err = svn.GetUpdatedPackages(cmd.Context(), pkgType, rev+1)
+				args, headRev, err = svn.GetUpdatedPackages(cmd.Context(), pkgType, rev+1, cutoff)
 				if err != nil {
 					if errors.Is(err, context.Canceled) || cmd.Context().Err() != nil {
 						return nil
@@ -517,10 +533,11 @@ func main() {
 				Int("head_revision", headRev).
 				Int("packages", len(args)).
 				Int("concurrency", opts.concurrency).
+				Dur("cooldown", opts.cooldown).
 				Dur("tag_timeout", opts.tagTimeout).
 				Msg("Starting migration")
 
-			if err := run(cmd.Context(), opts, args); err != nil {
+			if err := run(cmd.Context(), opts, args, cutoff); err != nil {
 				return fmt.Errorf("migration failed: %w", err)
 			}
 
@@ -540,6 +557,7 @@ func main() {
 	}
 
 	cmd.Flags().IntVarP(&opts.concurrency, "concurrency", "c", 2, "Number of concurrent migrations")
+	cmd.Flags().DurationVar(&opts.cooldown, "cooldown", 28*time.Hour, "Hold back tags pushed within this window (wp.org 24h release cooldown + safety margin); 0 disables")
 	cmd.Flags().DurationVar(&opts.tagTimeout, "tag-timeout", 8*time.Minute, "Timeout for migrating a single tag")
 
 	cmd.Flags().StringVarP(&opts.registry, "registry", "r", "registry.wpm.so", "wpm registry url")

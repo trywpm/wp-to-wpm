@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"wpm-migration/pkg/store"
 	"wpm-migration/pkg/unsafeconv"
@@ -30,14 +31,22 @@ func List(ctx context.Context, pkgType store.PackageType) (map[string]struct{}, 
 		svnRepo = pluginsSvnRepo
 	}
 
-	return list(ctx, svnRepo, validate.PackageName)
+	entries, err := listEntries(ctx, svnRepo, validate.PackageName)
+	if err != nil {
+		return nil, err
+	}
+
+	names := make(map[string]struct{}, len(entries))
+	for name := range entries {
+		names[name] = struct{}{}
+	}
+
+	return names, nil
 }
 
-// ListPluginTags lists all tags for a given plugin slug.
-//
-// Items are returned as a map where the key is the original tag name
-// from SVN and the value is the normalized version string.
-func ListPluginTags(ctx context.Context, pluginSlug string) (map[string]struct{}, error) {
+// ListPluginTags lists all tags for a given plugin slug, keyed by the original
+// SVN tag name and valued by the tag's last commit date.
+func ListPluginTags(ctx context.Context, pluginSlug string) (map[string]time.Time, error) {
 	if !validate.PackageName(unsafeconv.StringToBytes(pluginSlug)) {
 		return nil, fmt.Errorf("invalid plugin slug: %s", pluginSlug)
 	}
@@ -45,24 +54,22 @@ func ListPluginTags(ctx context.Context, pluginSlug string) (map[string]struct{}
 	// svn plugin repo stores tags under /tags/ subdirectory.
 	svnRepo := pluginsSvnRepo + "/" + pluginSlug + "/tags/"
 
-	return list(ctx, svnRepo, nil)
+	return listEntries(ctx, svnRepo, nil)
 }
 
-// ListThemeTags lists all tags for a given theme slug.
-//
-// Items are returned as a map where the key is the original tag name
-// from SVN and the value is the normalized version string.
-func ListThemeTags(ctx context.Context, themeSlug string) (map[string]struct{}, error) {
+// ListThemeTags lists all tags for a given theme slug, keyed by the original
+// SVN tag name and valued by the tag's last commit date.
+func ListThemeTags(ctx context.Context, themeSlug string) (map[string]time.Time, error) {
 	if !validate.PackageName(unsafeconv.StringToBytes(themeSlug)) {
 		return nil, fmt.Errorf("invalid theme slug: %s", themeSlug)
 	}
 
 	svnRepo := themesSvnRepo + "/" + themeSlug
 
-	return list(ctx, svnRepo, nil)
+	return listEntries(ctx, svnRepo, nil)
 }
 
-func ListTags(ctx context.Context, pkgType store.PackageType, slug string) (map[string]struct{}, error) {
+func ListTags(ctx context.Context, pkgType store.PackageType, slug string) (map[string]time.Time, error) {
 	switch pkgType {
 	case store.Theme:
 		return ListThemeTags(ctx, slug)
@@ -74,15 +81,20 @@ func ListTags(ctx context.Context, pkgType store.PackageType, slug string) (map[
 }
 
 type svnListEntry struct {
-	Name string `xml:"name"`
-	Kind string `xml:"kind,attr"`
+	Name   string `xml:"name"`
+	Kind   string `xml:"kind,attr"`
+	Commit struct {
+		Date string `xml:"date"`
+	} `xml:"commit"`
 }
 
 type svnListResult struct {
 	Entries []svnListEntry `xml:"list>entry"`
 }
 
-func list(ctx context.Context, svnRepo string, isValid func([]byte) bool) (map[string]struct{}, error) {
+// listEntries lists directory entries, keyed by name and valued by the entry's
+// last commit date. An unparseable or missing date yields the zero time.
+func listEntries(ctx context.Context, svnRepo string, isValid func([]byte) bool) (map[string]time.Time, error) {
 	cmd := exec.CommandContext(ctx, "svn", "list", "--xml", "--non-interactive", svnRepo)
 	cmd.Env = append(os.Environ(), "LC_ALL=", "LC_MESSAGES=C")
 
@@ -97,7 +109,7 @@ func list(ctx context.Context, svnRepo string, isValid func([]byte) bool) (map[s
 
 		errMsg := stderrBuf.String()
 		if strings.Contains(errMsg, "non-existent") {
-			return map[string]struct{}{}, nil
+			return map[string]time.Time{}, nil
 		}
 
 		return nil, fmt.Errorf("svn list failed for %s: %w\nstderr: %s", svnRepo, err, strings.TrimSpace(errMsg))
@@ -108,7 +120,7 @@ func list(ctx context.Context, svnRepo string, isValid func([]byte) bool) (map[s
 		return nil, fmt.Errorf("failed to parse svn list xml from %s: %w", svnRepo, err)
 	}
 
-	listMap := make(map[string]struct{}, len(result.Entries))
+	listMap := make(map[string]time.Time, len(result.Entries))
 	for _, entry := range result.Entries {
 		if entry.Kind != "dir" {
 			continue
@@ -122,7 +134,14 @@ func list(ctx context.Context, svnRepo string, isValid func([]byte) bool) (map[s
 			continue
 		}
 
-		listMap[entry.Name] = struct{}{}
+		var date time.Time
+		if entry.Commit.Date != "" {
+			if d, err := time.Parse(time.RFC3339Nano, entry.Commit.Date); err == nil {
+				date = d
+			}
+		}
+
+		listMap[entry.Name] = date
 	}
 
 	return listMap, nil
@@ -141,7 +160,13 @@ type svnLogResult struct {
 	Entries []SvnLogEntry `xml:"logentry"`
 }
 
-func GetUpdatedPackages(ctx context.Context, pkgType store.PackageType, startRev int) ([]string, int, error) {
+// GetUpdatedPackages returns the packages changed in the revision range
+// (startRev, cutoff], where cutoff is resolved to a concrete revision via svn's
+// {DATE} specifier. Revisions newer than cutoff (still within the cooldown) are
+// never fetched; the returned head revision is the resolved cutoff boundary, so
+// successive runs tile the revision space exactly: continuing from one run's
+// boundary to the next never skips or re-processes a revision.
+func GetUpdatedPackages(ctx context.Context, pkgType store.PackageType, startRev int, cutoff time.Time) ([]string, int, error) {
 	if startRev <= 0 {
 		return nil, 0, fmt.Errorf("invalid start revision: %d", startRev)
 	}
@@ -156,7 +181,22 @@ func GetUpdatedPackages(ctx context.Context, pkgType store.PackageType, startRev
 		return nil, 0, fmt.Errorf("invalid package type: %s", pkgType)
 	}
 
-	revisionRange := fmt.Sprintf("%d:HEAD", startRev)
+	// Resolve the cooldown cutoff to the youngest revision at or before it.
+	// Everything up to here has aged past the cooldown; newer revisions wait.
+	cutoffRev, err := revAtDate(ctx, svnRepoURL, cutoff)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, 0, ctx.Err()
+		}
+		return nil, 0, fmt.Errorf("failed to resolve cutoff revision: %w", err)
+	}
+
+	// Nothing has aged past the cutoff since the last run; hold the pointer.
+	if cutoffRev < startRev {
+		return []string{}, startRev - 1, nil
+	}
+
+	revisionRange := fmt.Sprintf("%d:%d", startRev, cutoffRev)
 
 	cmd := exec.CommandContext(ctx, "svn", "log", "--xml", "-q", "-v", "--non-interactive", "-r", revisionRange, svnRepoURL)
 	cmd.Env = append(os.Environ(), "LC_ALL=", "LC_MESSAGES=C")
@@ -184,17 +224,7 @@ func GetUpdatedPackages(ctx context.Context, pkgType store.PackageType, startRev
 	}
 
 	packageSet := make(map[string]struct{})
-	newHeadRev := 0
 	for _, entry := range result.Entries {
-		rev, err := strconv.Atoi(entry.Revision)
-		if err != nil {
-			return nil, 0, fmt.Errorf("failed to parse revision %q: %w", entry.Revision, err)
-		}
-
-		if rev > newHeadRev {
-			newHeadRev = rev
-		}
-
 		for _, p := range entry.Paths {
 			parts := strings.Split(strings.Trim(p.Path, "/"), "/")
 			if len(parts) <= 1 {
@@ -210,10 +240,6 @@ func GetUpdatedPackages(ctx context.Context, pkgType store.PackageType, startRev
 		}
 	}
 
-	if newHeadRev == 0 {
-		return []string{}, startRev - 1, nil
-	}
-
 	updatedPackages := make([]string, 0, len(packageSet))
 	for pkg := range packageSet {
 		if !validate.PackageName(unsafeconv.StringToBytes(pkg)) {
@@ -224,15 +250,42 @@ func GetUpdatedPackages(ctx context.Context, pkgType store.PackageType, startRev
 	}
 
 	sort.Strings(updatedPackages)
-	return updatedPackages, newHeadRev, nil
+
+	// Advance to the resolved cutoff, not merely the highest revision that
+	// touched a package, so the pointer never lags behind an aged revision.
+	return updatedPackages, cutoffRev, nil
 }
 
-func UpdatedPlugins(ctx context.Context, startRev int) ([]string, int, error) {
-	return GetUpdatedPackages(ctx, store.Plugin, startRev)
+// revAtDate resolves a timestamp to the youngest repository revision committed
+// at or before it, using svn's {DATE} revision specifier.
+func revAtDate(ctx context.Context, svnRepoURL string, date time.Time) (int, error) {
+	spec := "{" + date.UTC().Format("2006-01-02T15:04:05Z") + "}"
+
+	cmd := exec.CommandContext(ctx, "svn", "info", "--show-item", "revision", "--non-interactive", "-r", spec, svnRepoURL)
+	cmd.Env = append(os.Environ(), "LC_ALL=", "LC_MESSAGES=C")
+
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("svn info failed: %w\nstderr: %s", err, strings.TrimSpace(stderrBuf.String()))
+	}
+
+	rev, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse revision %q: %w", strings.TrimSpace(string(out)), err)
+	}
+
+	return rev, nil
 }
 
-func UpdatedThemes(ctx context.Context, startRev int) ([]string, int, error) {
-	return GetUpdatedPackages(ctx, store.Theme, startRev)
+func UpdatedPlugins(ctx context.Context, startRev int, cutoff time.Time) ([]string, int, error) {
+	return GetUpdatedPackages(ctx, store.Plugin, startRev, cutoff)
+}
+
+func UpdatedThemes(ctx context.Context, startRev int, cutoff time.Time) ([]string, int, error) {
+	return GetUpdatedPackages(ctx, store.Theme, startRev, cutoff)
 }
 
 // Export checks out a single tag of a package from SVN into a temp directory.
