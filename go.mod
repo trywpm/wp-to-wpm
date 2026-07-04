@@ -4,7 +4,7 @@ go 1.26.3
 
 require (
 	github.com/Masterminds/semver/v3 v3.5.0
-	github.com/newrelic/go-agent/v3 v3.43.3
+	github.com/newrelic/go-agent/v3 v3.44.1
 	github.com/newrelic/go-agent/v3/integrations/logcontext-v2/zerologWriter v1.0.5
 	github.com/rs/zerolog v1.35.1
 	github.com/spf13/cobra v1.10.2
