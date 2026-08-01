@@ -19,8 +19,8 @@ github.com/mattn/go-colorable v0.1.14 h1:9A9LHSqF/7dyVVX6g0U9cwm9pG3kP9gSzcuIPHP
 github.com/mattn/go-colorable v0.1.14/go.mod h1:6LmQG8QLFO4G5z1gPvYEzlUgJ2wF+stgPZH1UqBm1s8=
 github.com/mattn/go-isatty v0.0.20 h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWEY=
 github.com/mattn/go-isatty v0.0.20/go.mod h1:W+V8PltTTMOvKvAeJH7IuucS94S2C6jfK/D7dTCTo3Y=
-github.com/newrelic/go-agent/v3 v3.43.3 h1:0A6DkUBYK2bidV6jJDJ1SD2XkRlg976nl+SiEqkGTUQ=
-github.com/newrelic/go-agent/v3 v3.43.3/go.mod h1:MFXnCId5xXMIJI6A/kbkg0DO48EVTsKcmNijMYphzTg=
+github.com/newrelic/go-agent/v3 v3.44.1 h1:O5DnT3U0cPEian06GL6AXrv4qHoOxvxvAD7shqRGyTQ=
+github.com/newrelic/go-agent/v3 v3.44.1/go.mod h1:5A2u/S0na/zIg5hS197XdK+ZkLqTRq5baFzJfVWrc3Q=
 github.com/newrelic/go-agent/v3/integrations/logcontext-v2/nrwriter v1.0.2 h1:aDiFahAJlmuCcsUqcXqxbRLsBFsPf6U0ptQULRm4Y/s=
 github.com/newrelic/go-agent/v3/integrations/logcontext-v2/nrwriter v1.0.2/go.mod h1:Aq6/RsiWYYt8zrwfL3pDjUf5yRS0T5a7FMZRGJ0NnZs=
 github.com/newrelic/go-agent/v3/integrations/logcontext-v2/zerologWriter v1.0.5 h1:pPtcJX2Pbk6AxQ1gvlsaVrE/+1UgH+WDmHRF1xF5wI4=
