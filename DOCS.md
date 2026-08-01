@@ -13,6 +13,39 @@ changes.
 The rest of this document explains how the parts fit together, what state they
 keep, and what to do when something looks wrong.
 
+## Design rationale
+
+Three decisions shape everything below. They are recorded here because the
+reasoning is not obvious from the code, and because each has a cost worth
+knowing before you change it.
+
+**State lives in git.** There is no database and no external state store. The
+allowlists, closure lists, and SVN revision pointers are files under `state/`,
+and every workflow that changes them commits the result back to `main`. This
+buys an audit trail per state change (`git log -- state/plugin_last_rev` is the
+migration history), point-in-time recovery by checking out a known-good file,
+and reviewable diffs when a number looks wrong. The cost is that every state
+change serializes through pushes to one branch, which the concurrency group and
+the push retry loop in section 9 already absorb. At the current rate of a few
+hundred commits a day this is comfortable. An order of magnitude more churn
+would mean trimming history or moving to a real store, and that is the point at
+which this decision should be revisited rather than defended.
+
+**Compute is GitHub Actions, serialized by one concurrency group.** All three
+workflows declare `group: migrate-pipeline`, so at most one runs at any moment.
+Every reader and writer of the state files is therefore serialized by the
+platform itself, which removes a whole class of races without a lock service,
+leader election, or any reasoning about interleaving on our part. Section 9
+covers what this does and does not protect against.
+
+**Scheduling is a Cloudflare Worker, not `on: schedule`.** Actions' built-in
+cron drifts under load and drops ticks, and more importantly it fires blind: it
+cannot look at what is already running before it triggers. The worker holds the
+cron instead, queries the Actions API for in-flight runs, and only dispatches
+when it makes sense to. It also gates the daily revalidation behind a single KV
+key with a 23-hour TTL, which makes that dispatch idempotent across missed,
+delayed, or duplicated ticks. Section 4 covers the decision tree.
+
 ## 1. Architecture at a glance
 
 A scheduler triggers workflows. The workflows run the binaries inside a
@@ -164,7 +197,11 @@ within the same job), and `worker-types.d.ts` (regenerated each time you run
 ## 4. Cloudflare Worker (`worker.ts`)
 
 The worker is the system's clock. It does not process anything itself; it
-decides when to wake the workflows up. Two cron schedules are configured:
+decides when to wake the workflows up. It exists instead of an `on: schedule`
+trigger because it can do two things Actions cron cannot: look at what is
+currently running and decline to dispatch, and persist a marker across ticks so
+a once-a-day job stays once a day even when cron misfires. Two cron schedules
+are configured:
 
 ```jsonc
 // wrangler.json
@@ -219,9 +256,12 @@ dispatch to falsely mark the day as done.
 ## 5. GitHub Actions workflows
 
 All three workflows are triggered by `workflow_dispatch` only. There is no
-`on: schedule` and no `on: push`. In normal operation the worker is the only
-thing firing them, but you can also dispatch any of them manually from the
-GitHub UI and they will behave identically.
+`on: schedule` and no `on: push`. Scheduling lives in the worker instead, for
+the reasons in the design rationale: Actions cron drifts, drops ticks, and
+cannot inspect running state before it fires, while the worker can query the API
+and decide not to dispatch at all. In normal operation the worker is the only
+thing firing these, but any of them can be dispatched by hand from the GitHub UI
+and will behave identically.
 
 ### 5.1 `build.yml`
 
