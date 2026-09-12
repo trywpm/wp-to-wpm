@@ -1,6 +1,6 @@
 module wpm-migration
 
-go 1.26.3
+go 1.27.0
 
 require (
 	github.com/Masterminds/semver/v3 v3.5.0
@@ -8,7 +8,7 @@ require (
 	github.com/newrelic/go-agent/v3/integrations/logcontext-v2/zerologWriter v1.0.5
 	github.com/rs/zerolog v1.35.1
 	github.com/spf13/cobra v1.10.2
-	go.wpm.so/cli v0.1.14
+	go.wpm.so/cli v0.1.15
 	golang.org/x/sync v0.22.0
 )
 
