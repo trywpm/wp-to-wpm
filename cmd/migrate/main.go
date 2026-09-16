@@ -506,7 +506,7 @@ func main() {
 
 			// A single migrate run should never process thousands of
 			// packages.
-			const maxPackagesPerRun = 1000
+			const maxPackagesPerRun = 5000
 			if len(args) > maxPackagesPerRun {
 				return fmt.Errorf("svn log returned %d packages (safety cap %d). Advance .%s_last_rev closer to HEAD and re-run, or invoke with a smaller explicit slug list", len(args), maxPackagesPerRun, pkgType)
 			}
