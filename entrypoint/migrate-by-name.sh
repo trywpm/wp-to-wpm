@@ -23,5 +23,5 @@ if [ -z "${NAMES}" ]; then
 fi
 
 echo "::group::run migration (${PACKAGE_TYPE})"
-echo "${NAMES}" | xargs migrate-wpm --type ${PACKAGE_TYPE} --concurrency ${CONCURRENCY:-2}
+echo "${NAMES}" | tr ',' ' ' | xargs migrate-wpm --type ${PACKAGE_TYPE} --concurrency ${CONCURRENCY:-2}
 echo "::endgroup::"

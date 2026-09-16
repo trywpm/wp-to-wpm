@@ -29,6 +29,11 @@ jobs:
       packages: read
       contents: read
     steps:
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: registry login
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -49,4 +54,5 @@ jobs:
             -e PACKAGE_TYPE=${{ inputs.type }} \
             -e NAMES="${INPUT_NAMES}" \
             -e NEW_RELIC_LICENSE_KEY=${{ secrets.NEW_RELIC_LICENSE_KEY }} \
+            -v ${{ github.workspace }}:/code \
             trywpm/wp-to-wpm:latest migrate-by-name
