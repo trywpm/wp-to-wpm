@@ -9,6 +9,10 @@ echo "wpm version: $(wpm --version)"
 echo "svn version: $(svn --version --quiet)"
 echo "::endgroup::"
 
+echo "::group::registry health"
+wget -q -T 15 -t 3 -O /dev/null https://registry.wpm.so/-/health
+echo "::endgroup::"
+
 echo "::group::wpm login"
 wpm auth login --token ${WPM_TOKEN}
 echo "::endgroup::"
