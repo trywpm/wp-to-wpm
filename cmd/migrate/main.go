@@ -185,6 +185,10 @@ func run(ctx context.Context, o Options, packages []string, cutoff time.Time) er
 
 	_ = eg.Wait()
 
+	if n := c.errored.Load(); n > 0 && ctx.Err() == nil {
+		return fmt.Errorf("%d packages hit infra errors; not advancing svn rev", n)
+	}
+
 	return nil
 }
 
