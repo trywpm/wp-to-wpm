@@ -51,6 +51,7 @@ jobs:
             -e CI=true \
             -e CONCURRENCY=2 \
             -e WPM_TOKEN=${{ secrets.WPM_TOKEN }} \
+            -e HEALTH_KEY=${{ secrets.HEALTH_KEY }} \
             -e PACKAGE_TYPE=${{ inputs.type }} \
             -e NAMES="${INPUT_NAMES}" \
             -e NEW_RELIC_LICENSE_KEY=${{ secrets.NEW_RELIC_LICENSE_KEY }} \

@@ -3,6 +3,7 @@
 set -e
 
 echo "::add-mask::${WPM_TOKEN}"
+echo "::add-mask::${HEALTH_KEY}"
 
 echo "::group::version info"
 echo "wpm version: $(wpm --version)"
@@ -10,7 +11,7 @@ echo "svn version: $(svn --version --quiet)"
 echo "::endgroup::"
 
 echo "::group::registry health"
-wget -q -T 15 -t 3 -O /dev/null https://registry.wpm.so/-/health
+wget -q -T 15 -t 3 -O /dev/null --header "X-Health-Key: ${HEALTH_KEY}" https://registry.wpm.so/-/health
 echo "::endgroup::"
 
 echo "::group::wpm login"

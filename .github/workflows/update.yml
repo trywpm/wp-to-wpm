@@ -100,6 +100,7 @@ jobs:
             -e CI=true \
             -e CONCURRENCY=2 \
             -e WPM_TOKEN=${{ secrets.WPM_TOKEN }} \
+            -e HEALTH_KEY=${{ secrets.HEALTH_KEY }} \
             -e PACKAGE_TYPE=plugin \
             -e NEW_RELIC_LICENSE_KEY=${{ secrets.NEW_RELIC_LICENSE_KEY }} \
             -v ${{ github.workspace }}:/code \
@@ -111,6 +112,7 @@ jobs:
             -e CI=true \
             -e CONCURRENCY=2 \
             -e WPM_TOKEN=${{ secrets.WPM_TOKEN }} \
+            -e HEALTH_KEY=${{ secrets.HEALTH_KEY }} \
             -e PACKAGE_TYPE=theme \
             -e NEW_RELIC_LICENSE_KEY=${{ secrets.NEW_RELIC_LICENSE_KEY }} \
             -v ${{ github.workspace }}:/code \
