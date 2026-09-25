@@ -108,7 +108,7 @@ func listEntries(ctx context.Context, svnRepo string, isValid func([]byte) bool)
 		}
 
 		errMsg := stderrBuf.String()
-		if strings.Contains(errMsg, "non-existent") {
+		if strings.Contains(errMsg, "W160013") || strings.Contains(errMsg, "non-existent") {
 			return map[string]time.Time{}, nil
 		}
 
