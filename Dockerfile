@@ -12,7 +12,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -ldflags="-w -s" -o wpm-update cmd/upda
 RUN CGO_ENABLED=0 GOOS=linux go build -a -ldflags="-w -s" -o wpm-migrate cmd/migrate/main.go
 RUN CGO_ENABLED=0 GOOS=linux go build -a -ldflags="-w -s" -o wpm-revalidate cmd/revalidate/main.go
 
-FROM alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+FROM alpine@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 
 ARG USER_UID=1000
 ARG USER_GID=1000
